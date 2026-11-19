@@ -11,6 +11,7 @@ import com.example.game.CarromGeometrySolver
 import com.example.game.CarromMemoryData
 import com.example.game.CarromPowerStyle
 import com.example.game.CarromShotMemoryStore
+import com.example.game.CarromShotOutcomeType
 import com.example.game.CarromTurnHudState
 import com.example.game.CarromTurnMemory
 import com.example.game.CarromVisionDetector
@@ -432,6 +433,7 @@ object AgentCoordinator {
                 var movedStrikerThisTurn = false
                 var pendingSliderVerify: PendingSliderVerify? = null
                 var pendingCarromShot: PendingCarromShotRecord? = null
+                var queenPendingCover = false
                 val carromTurnMemory = CarromTurnMemory()
                 val awaitingRepliesByPeer = mutableMapOf<String, ChatTurnGuard.AwaitingReplyState>()
                 var pendingSentTextForPeer: Pair<String, String>? = null
@@ -1094,7 +1096,8 @@ object AgentCoordinator {
                                 allowStrikerRepositioning = allowRepositionByBudget,
                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
                                 useSubPixelRefinement = currentSettings.useSubPixelCircleRefinement,
-                                isFreestyle = isFreestyleMode
+                                isFreestyle = isFreestyleMode,
+                                queenPendingCover = queenPendingCover
                             )
 
                             // Evaluate the previous Carrom shot once coins have stopped moving
@@ -1120,6 +1123,14 @@ object AgentCoordinator {
                                 if (postCounts != null) {
                                     val eval = carromShotMemoryStore?.recordShotOutcome(prevShot, postCounts)
                                     pendingCarromShot = null
+                                    if (eval?.outcomeType == CarromShotOutcomeType.POCKETED_QUEEN &&
+                                        !prevShot.isFreestyle &&
+                                        postCounts.myCount > 0
+                                    ) {
+                                        queenPendingCover = true
+                                    } else {
+                                        queenPendingCover = false
+                                    }
                                     if (eval != null) {
                                         lastOutcomeHint = "${eval.summaryMessage} $lastOutcomeHint"
                                         workingMemory = eval.summaryMessage
@@ -1136,6 +1147,16 @@ object AgentCoordinator {
                                             }
                                         }
                                     }
+                                }
+                            }
+                            if (queenPendingCover) {
+                                val visiblePieces = when (outcome) {
+                                    is CarromVisionOutcome.SolvedShot -> outcome.boardPieces
+                                    is CarromVisionOutcome.WaitStillnessOrTurn -> outcome.boardPieces
+                                    is CarromVisionOutcome.NeedsAiVision -> outcome.boardPieces
+                                }
+                                if (visiblePieces.any { it.color == CoinColor.QUEEN }) {
+                                    queenPendingCover = false
                                 }
                             }
 
@@ -1199,7 +1220,7 @@ object AgentCoordinator {
                                         consensusPieces
                                     }
 
-                                    // Step 1 of Turn: Full-board pre-scan builds top-7 physics-ranked baseline X queue
+                                    // Step 1 of Turn: Full-board pre-scan builds top-4 physics-ranked baseline X queue
                                     if (!carromTurnMemory.isProbeQueueInitialized) {
                                         val rankedSpots = CarromGeometrySolver.buildRankedBaselineProbeQueue(
                                             board = outcome.board,
@@ -1208,7 +1229,8 @@ object AgentCoordinator {
                                             existingStriker = striker,
                                             shotMemory = currentCarromMem,
                                             maxProbes = CarromTurnMemory.MAX_BASELINE_PROBES,
-                                            isFreestyle = isFreestyleMode
+                                            isFreestyle = isFreestyleMode,
+                                            queenPendingCover = queenPendingCover
                                         )
                                         carromTurnMemory.initializeProbeQueueIfNeeded(rankedSpots)
                                     }
@@ -1232,7 +1254,8 @@ object AgentCoordinator {
                                             canRepositionStriker = false,
                                             shotMemory = currentCarromMem,
                                             usePhysicsRollout = currentSettings.usePhysicsRollout,
-                                            isFreestyle = isFreestyleMode
+                                            isFreestyle = isFreestyleMode,
+                                            queenPendingCover = queenPendingCover
                                         )
                                     } else {
                                         null
@@ -1251,6 +1274,7 @@ object AgentCoordinator {
                                         !carromTurnMemory.isSliderStalledOrOscillating(verifyState.targetStrikerX, striker.center.x)
 
                                     var nextProbeTargetX: Float? = null
+                                    var returningToBestProbe = false
                                     if (!isVerifiedSureHere && !needsClosedLoopCorrection && striker != null) {
                                         // Reject current spot because collision missed/fouled or no Sure Shot found here
                                         val rejectWhy = when {
@@ -1261,6 +1285,16 @@ object AgentCoordinator {
                                         carromTurnMemory.markSpotRejected(striker.center.x, rejectWhy)
                                         if (canAffordSlide) {
                                             nextProbeTargetX = carromTurnMemory.nextUntestedProbeSpot(striker.center.x)?.strikerX
+                                            if (nextProbeTargetX == null) {
+                                                val returnX = carromTurnMemory.bestEvaluatedSpotToReturnTo(
+                                                    currentStrikerX = striker.center.x,
+                                                    currentInPlaceConfidence = inPlaceSol?.confidenceScore ?: 0f
+                                                )
+                                                if (returnX != null) {
+                                                    nextProbeTargetX = returnX
+                                                    returningToBestProbe = true
+                                                }
+                                            }
                                         }
                                     }
 
@@ -1275,8 +1309,13 @@ object AgentCoordinator {
                                     }
 
                                     if (slideTargetX != null && striker != null && sliderKnob != null) {
+                                        if (returningToBestProbe) {
+                                            carromTurnMemory.markReturnedToBestSpot()
+                                        }
                                         val rawDelta = slideTargetX - striker.center.x
-                                        val calibratedDelta = (rawDelta / turnGain).coerceIn(-380f, 380f)
+                                        val maxSliderDelta = (outcome.board.width * 0.72f)
+                                            .coerceIn(380f, (snapshot.screenWidth * 0.85f).coerceAtLeast(380f))
+                                        val calibratedDelta = (rawDelta / turnGain).coerceIn(-maxSliderDelta, maxSliderDelta)
                                         val targetKnobEndX = (sliderKnob.x + calibratedDelta)
                                             .toInt()
                                             .coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
@@ -1329,7 +1368,8 @@ object AgentCoordinator {
                                                 shotMemory = currentCarromMem,
                                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
                                                 fallbackSolution = outcome.solution,
-                                                isFreestyle = isFreestyleMode
+                                                isFreestyle = isFreestyleMode,
+                                                queenPendingCover = queenPendingCover
                                             )
                                         }
 

@@ -90,12 +90,16 @@ object CarromGeometrySolver {
         canRepositionStriker: Boolean = true,
         shotMemory: CarromMemoryData? = null,
         usePhysicsRollout: Boolean = true,
-        isFreestyle: Boolean = false
+        isFreestyle: Boolean = false,
+        queenPendingCover: Boolean = false
     ): CarromShotSolution? {
         if (board.pockets.size < 4) return null
 
         val targetPieces = if (isFreestyle) {
             pieces.filter { it.color != CoinColor.STRIKER }
+        } else if (queenPendingCover) {
+            pieces.filter { it.color == myCoinColor }
+                .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
         } else {
             pieces.filter {
                 it.color == myCoinColor || it.color == CoinColor.QUEEN
@@ -204,6 +208,7 @@ object CarromGeometrySolver {
 
                     val hangerBonus = if (isHanger) 0.16f else 0f
                     val queenBonus = if (coin.color == CoinColor.QUEEN) 0.09f else 0f
+                    val coverBonus = if (queenPendingCover && coin.color == myCoinColor) 0.14f else 0f
                     val angleScore = 1f - (cutAngleDeg / 66f) * 0.55f
                     val distScore = 1f - ((distCoinPocket + distStrikerGhost) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
                     val isCurrentStrikerPos = existingStriker != null && abs(strikerPos.x - existingStriker.center.x) < 18f
@@ -211,7 +216,7 @@ object CarromGeometrySolver {
                     val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutAngleDeg) ?: 0f
                     val normStrikerX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
                     val heatmapPenalty = (shotMemory?.scratchHeatmap?.riskFor(pocketIdx, cutAngleDeg, normStrikerX) ?: 0f) * 0.35f
-                    val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + hangerBonus + existingBonus + memoryBias - heatmapPenalty)
+                    val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + coverBonus + hangerBonus + existingBonus + memoryBias - heatmapPenalty)
                         .coerceIn(0.05f, 1f)
 
                     directPool.add(
@@ -436,11 +441,15 @@ object CarromGeometrySolver {
         existingStriker: CarromPiece?,
         shotMemory: CarromMemoryData?,
         maxProbes: Int = CarromTurnMemory.MAX_BASELINE_PROBES,
-        isFreestyle: Boolean = false
+        isFreestyle: Boolean = false,
+        queenPendingCover: Boolean = false
     ): List<RankedBaselineSpot> {
         if (board.pockets.size < 4) return emptyList()
         val targetPieces = if (isFreestyle) {
             pieces.filter { it.color != CoinColor.STRIKER }
+        } else if (queenPendingCover) {
+            pieces.filter { it.color == myCoinColor }
+                .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
         } else {
             pieces.filter {
                 it.color == myCoinColor || it.color == CoinColor.QUEEN
@@ -636,7 +645,8 @@ object CarromGeometrySolver {
         existingStriker: CarromPiece?,
         shotMemory: CarromMemoryData?,
         usePhysicsRollout: Boolean = true,
-        isFreestyle: Boolean = false
+        isFreestyle: Boolean = false,
+        queenPendingCover: Boolean = false
     ): CarromShotSolution? {
         val inPlaceAttempt = solveBestShot(
             board = board,
@@ -648,7 +658,8 @@ object CarromGeometrySolver {
             canRepositionStriker = false,
             shotMemory = shotMemory,
             usePhysicsRollout = usePhysicsRollout,
-            isFreestyle = isFreestyle
+            isFreestyle = isFreestyle,
+            queenPendingCover = queenPendingCover
         )
         if (inPlaceAttempt != null && !inPlaceAttempt.rejectedDueToCollisionOrFoul) {
             return inPlaceAttempt

@@ -2886,6 +2886,128 @@ class AgentLogicUnitTest {
             )
         )
     }
+
+    @Test
+    fun `carrom improvements cover queen urgency soft watch shot best probe return and bounce out friction`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f),
+                com.example.game.Point2D(960f, 560f),
+                com.example.game.Point2D(120f, 1400f),
+                com.example.game.Point2D(960f, 1400f)
+            ),
+            baselineY = 1320f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+
+        // 1. Queen Cover urgency prioritizes own WHITE coin instead of straying when queenPendingCover = true
+        val coverWhite = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(760f, 760f),
+            radiusPx = 28f
+        )
+        val striker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(540f, 1320f),
+            radiusPx = 35f
+        )
+        val coverSol = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = listOf(coverWhite, striker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            existingStriker = striker,
+            canRepositionStriker = false,
+            queenPendingCover = true
+        )
+        org.junit.Assert.assertNotNull(coverSol)
+        assertEquals(com.example.game.CoinColor.WHITE, coverSol!!.targetCoin.color)
+
+        // 2. Soft hanger shot with low lumaDiff (2.5f) still gets learned by Watch & Learn when coin disappears
+        val trainer = com.example.game.CarromWatchTrainer()
+        val hangerWhite = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(175f, 615f),
+            radiusPx = 28f
+        )
+        val otherBlack = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(700f, 920f),
+            radiusPx = 28f
+        )
+        val preObs = com.example.game.CarromWatchObservation(
+            board = board,
+            pieces = listOf(hangerWhite, otherBlack, striker),
+            striker = striker,
+            sliderKnob = com.example.game.Point2D(540f, 1520f),
+            lumaDiff = 0f,
+            isInMotion = false,
+            isLikelyGameBoard = true
+        )
+        trainer.processObservation(preObs, com.example.game.CoinColor.WHITE, isFreestyle = false, nowMs = 1_000L)
+        val softSettled = com.example.game.CarromWatchObservation(
+            board = board,
+            pieces = listOf(otherBlack, striker),
+            striker = striker,
+            sliderKnob = com.example.game.Point2D(540f, 1520f),
+            lumaDiff = 2.5f,
+            isInMotion = false,
+            isLikelyGameBoard = true
+        )
+        val softUpdate1 = trainer.processObservation(softSettled, com.example.game.CoinColor.WHITE, isFreestyle = false, nowMs = 1_500L)
+        assertEquals(com.example.game.WatchTrainerPhase.TRACKING_MOTION, softUpdate1.phase)
+        val softUpdate2 = trainer.processObservation(softSettled, com.example.game.CoinColor.WHITE, isFreestyle = false, nowMs = 1_750L)
+        org.junit.Assert.assertNotNull("Expected soft shot with low lumaDiff to be learned", softUpdate2.completedShot)
+
+        // 3. CarromTurnMemory returns best evaluated non-sure spot once when current spot is weak
+        val turnMem = com.example.game.CarromTurnMemory()
+        turnMem.ensureTurnStarted(1_000L)
+        val strongNonSure = coverSol.copy(
+            strikerPos = com.example.game.Point2D(260f, 1320f),
+            isSureShot = false,
+            isBreakShot = false,
+            rejectedDueToCollisionOrFoul = false,
+            confidenceScore = 0.84f
+        )
+        turnMem.recordObservation(
+            nowMs = 1_500L,
+            pieces = listOf(coverWhite),
+            striker = striker.copy(center = com.example.game.Point2D(260f, 1320f)),
+            sliderKnob = com.example.game.Point2D(260f, 1520f),
+            evaluatedSolution = strongNonSure
+        )
+        assertEquals(260f, turnMem.bestEvaluatedSpotToReturnTo(620f, 0.52f) ?: -1f, 0.1f)
+        turnMem.markReturnedToBestSpot()
+        assertEquals(null, turnMem.bestEvaluatedSpotToReturnTo(620f, 0.52f))
+
+        // 4. Straight medium/hard bounce-out miss lowers frictionScale and shotPowerGain
+        val straightMiss = com.example.game.PendingCarromShotRecord(
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            targetCoinColor = com.example.game.CoinColor.WHITE,
+            pocketIndex = 0,
+            cutAngleDeg = 8f,
+            powerStyle = com.example.game.CarromPowerStyle.MEDIUM,
+            movedStrikerWithSlider = false,
+            isBankShot = false,
+            isComboShot = false,
+            isBreakShot = false,
+            preCounts = com.example.game.BoardPieceCounts(myCount = 4, opponentCount = 4, queenCount = 1)
+        )
+        val missEval = com.example.game.CarromShotMemoryStore.evaluateShotOutcome(
+            current = com.example.game.CarromMemoryData(),
+            pendingShot = straightMiss,
+            postCounts = com.example.game.BoardPieceCounts(myCount = 4, opponentCount = 4, queenCount = 1)
+        )
+        assertTrue(missEval.updatedMemory.matchCalibration.frictionScale < 1.0f)
+        assertTrue(missEval.updatedMemory.matchCalibration.shotPowerGain < 1.0f)
+    }
 }
 
 

@@ -161,9 +161,10 @@ class CarromWatchTrainer {
         missedBoardWhileInMotionFrames = 0
 
         if (!inMotion) {
+            val softShotTriggered = preShotObs != null && didSoftShotStart(preShotObs!!, obs, armedTurnSide)
             val hasPlayerStrikerOnBaseline = obs.striker != null || obs.sliderKnob != null
             val hasOpponentStrikerOnBaseline = !hasPlayerStrikerOnBaseline && obs.topStriker != null
-            if (!obs.isInMotion && (hasPlayerStrikerOnBaseline || hasOpponentStrikerOnBaseline)) {
+            if (!obs.isInMotion && !softShotTriggered && (hasPlayerStrikerOnBaseline || hasOpponentStrikerOnBaseline)) {
                 val side = if (hasPlayerStrikerOnBaseline) WatchTurnSide.PLAYER_BOTTOM else WatchTurnSide.OPPONENT_TOP
                 if (armedTurnSide != side) {
                     turnInitialStrikerX = null
@@ -189,7 +190,7 @@ class CarromWatchTrainer {
                 )
             }
 
-            if (obs.isInMotion && preShotObs != null) {
+            if ((obs.isInMotion || softShotTriggered) && preShotObs != null) {
                 val pre = preShotObs!!
                 val side = armedTurnSide
                     ?: if (pre.striker != null || pre.sliderKnob != null) WatchTurnSide.PLAYER_BOTTOM else WatchTurnSide.OPPONENT_TOP
@@ -197,7 +198,7 @@ class CarromWatchTrainer {
                 inMotion = true
                 motionStartMs = nowMs
                 maxMotionDiff = obs.lumaDiff
-                settledStillFrames = 0
+                settledStillFrames = if (!obs.isInMotion) 1 else 0
                 val coinR = pre.board.coinRadiusPx
                 earlyMovedStriker = if (side == WatchTurnSide.PLAYER_BOTTOM) {
                     val preBaselineY = pre.board.baselineY
@@ -351,6 +352,53 @@ class CarromWatchTrainer {
             hudStatusText = "Learned #$shotsObserved ($potsObserved pots, $foulsObserved fouls): ${inferred.humanInsightSummary}",
             completedShot = inferred
         )
+    }
+
+    private fun didSoftShotStart(
+        pre: CarromWatchObservation,
+        cur: CarromWatchObservation,
+        armedSide: WatchTurnSide?
+    ): Boolean {
+        val side = armedSide
+            ?: if (pre.striker != null || pre.sliderKnob != null) WatchTurnSide.PLAYER_BOTTOM else WatchTurnSide.OPPONENT_TOP
+        val coinR = pre.board.coinRadiusPx.coerceAtLeast(14f)
+
+        // 1. Striker visibly launched away from its baseline
+        if (side == WatchTurnSide.PLAYER_BOTTOM && cur.striker != null &&
+            cur.striker.center.y < pre.board.baselineY - coinR * 1.4f
+        ) {
+            return true
+        }
+        if (side == WatchTurnSide.OPPONENT_TOP && cur.topStriker != null) {
+            val preTopY = pre.topStriker?.center?.y ?: (pre.board.top + pre.board.height * 0.155f)
+            if (cur.topStriker.center.y > preTopY + coinR * 1.4f) {
+                return true
+            }
+        }
+
+        // 2. Non-striker coin count changed or a coin displaced meaningfully (even on a quiet soft tap)
+        val preCoins = pre.pieces.filter { it.color != CoinColor.STRIKER }
+        val curCoins = cur.pieces.filter { it.color != CoinColor.STRIKER }
+        if (preCoins.size != curCoins.size) {
+            return true
+        }
+        val moveTol = coinR * 0.95f
+        for (p in preCoins) {
+            val nearest = curCoins
+                .filter { it.color == p.color }
+                .minOfOrNull { hypot(it.center.x - p.center.x, it.center.y - p.center.y) }
+            if (nearest == null || nearest >= moveTol) {
+                return true
+            }
+        }
+
+        // 3. Turn flipped to the opposite baseline between frames
+        val hasBottomNow = cur.striker != null || cur.sliderKnob != null
+        val hasTopNow = !hasBottomNow && cur.topStriker != null
+        if (side == WatchTurnSide.PLAYER_BOTTOM && hasTopNow) return true
+        if (side == WatchTurnSide.OPPONENT_TOP && hasBottomNow) return true
+
+        return false
     }
 
     companion object {

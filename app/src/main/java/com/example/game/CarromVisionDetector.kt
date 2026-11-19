@@ -60,7 +60,8 @@ object CarromVisionDetector {
         allowStrikerRepositioning: Boolean = true,
         usePhysicsRollout: Boolean = true,
         useSubPixelRefinement: Boolean = true,
-        isFreestyle: Boolean = false
+        isFreestyle: Boolean = false,
+        queenPendingCover: Boolean = false
     ): CarromVisionOutcome {
         if (screenshot == null || screenshot.width < 120 || screenshot.height < 120) {
             return CarromVisionOutcome.NeedsAiVision("No screenshot available for Carrom solver.")
@@ -89,7 +90,7 @@ object CarromVisionDetector {
         previousBoardLuma = currentLuma
 
         val effectiveMotionThreshold = if (allowStrikerRepositioning) MOTION_THRESHOLD else MOTION_THRESHOLD * 1.55f
-        if (prevLuma != null && consecutiveOfflineWaits < 2) {
+        if (prevLuma != null && consecutiveOfflineWaits < 6) {
             val meanDiff = computeMeanAbsDiff(prevLuma, currentLuma)
             if (meanDiff > effectiveMotionThreshold) {
                 return CarromVisionOutcome.WaitStillnessOrTurn(
@@ -199,10 +200,26 @@ object CarromVisionDetector {
 
         val strikerPiece = promoted.firstOrNull { it.color == CoinColor.STRIKER }
         if (strikerPiece == null && sliderKnobPx == null) {
-            return if (consecutiveOfflineWaits < 1) {
-                // Wait at most 1 short cycle if baseline looks empty (opponent turn), then let AI inspect.
+            val detectedTopStriker = detectTopStrikerOnBaseline(
+                bitmap = screenshot,
+                boardLeft = boardBmLeft,
+                boardTop = boardBmTop,
+                boardRight = boardBmRight,
+                boardBottom = boardBmBottom,
+                scaleX = scaleX,
+                scaleY = scaleY,
+                strikerRadiusPx = strikerRadius,
+                useSubPixelRefinement = false
+            )
+            val maxTurnWaitCycles = if (detectedTopStriker != null) 12 else 3
+            return if (consecutiveOfflineWaits < maxTurnWaitCycles) {
+                val reason = if (detectedTopStriker != null) {
+                    "Opponent striker confirmed on top baseline — waiting offline for our turn (0 API)."
+                } else {
+                    "Striker/slider not on bottom baseline (likely opponent turn) — waiting offline (0 API)."
+                }
                 CarromVisionOutcome.WaitStillnessOrTurn(
-                    reason = "Striker/slider not on bottom baseline (likely opponent turn) — waiting once offline (0 API).",
+                    reason = reason,
                     boardPieces = promoted
                 )
             } else {
@@ -236,7 +253,8 @@ object CarromVisionDetector {
             canRepositionStriker = allowStrikerRepositioning,
             shotMemory = shotMemory,
             usePhysicsRollout = usePhysicsRollout,
-            isFreestyle = isFreestyle
+            isFreestyle = isFreestyle,
+            queenPendingCover = queenPendingCover
         )
 
         val finalSolution = if (solution != null && solution.confidenceScore >= 0.50f) {
@@ -252,7 +270,8 @@ object CarromVisionDetector {
                 existingStriker = strikerPiece,
                 shotMemory = shotMemory,
                 usePhysicsRollout = usePhysicsRollout,
-                isFreestyle = isFreestyle
+                isFreestyle = isFreestyle,
+                queenPendingCover = queenPendingCover
             ) ?: solution
         } else {
             solution
@@ -406,7 +425,7 @@ object CarromVisionDetector {
         val strikerPiece = promoted.firstOrNull { it.color == CoinColor.STRIKER }
         // Only during opponent's turn (bottom striker & slider absent), detect opponent striker on top baseline
         val detectedTopStriker = if (strikerPiece == null && sliderKnobPx == null) {
-            val rawTop = detectVividStrikerOnBand(
+            detectTopStrikerOnBaseline(
                 bitmap = screenshot,
                 boardLeft = boardBmLeft,
                 boardTop = boardBmTop,
@@ -414,35 +433,9 @@ object CarromVisionDetector {
                 boardBottom = boardBmBottom,
                 scaleX = scaleX,
                 scaleY = scaleY,
-                baselineFraction = 0.155f,
                 strikerRadiusPx = strikerRadius,
                 useSubPixelRefinement = !isInMotion
-            ) ?: detectAnyStrikerOnBaseline(
-                bitmap = screenshot,
-                boardLeft = boardBmLeft,
-                boardTop = boardBmTop,
-                boardRight = boardBmRight,
-                boardBottom = boardBmBottom,
-                scaleX = scaleX,
-                scaleY = scaleY,
-                strikerRadiusPx = strikerRadius,
-                sliderKnobPx = null,
-                scanTopFraction = 0.07f,
-                scanBottomFraction = 0.24f
             )
-            if (rawTop != null && !isInMotion) {
-                rawTop.copy(
-                    center = CarromCircleRefiner.refinePieceCenterSubPixel(
-                        bitmap = screenshot,
-                        coarseCenterScreen = rawTop.center,
-                        expectedRadiusScreen = strikerRadius,
-                        scaleX = scaleX,
-                        scaleY = scaleY
-                    )
-                )
-            } else {
-                rawTop
-            }
         } else {
             null
         }
@@ -483,6 +476,56 @@ object CarromVisionDetector {
             isLikelyGameBoard = nonStrikerCount >= 2,
             topStriker = detectedTopStriker
         )
+    }
+
+    private fun detectTopStrikerOnBaseline(
+        bitmap: Bitmap,
+        boardLeft: Int,
+        boardTop: Int,
+        boardRight: Int,
+        boardBottom: Int,
+        scaleX: Float,
+        scaleY: Float,
+        strikerRadiusPx: Float,
+        useSubPixelRefinement: Boolean
+    ): CarromPiece? {
+        val rawTop = detectVividStrikerOnBand(
+            bitmap = bitmap,
+            boardLeft = boardLeft,
+            boardTop = boardTop,
+            boardRight = boardRight,
+            boardBottom = boardBottom,
+            scaleX = scaleX,
+            scaleY = scaleY,
+            baselineFraction = 0.155f,
+            strikerRadiusPx = strikerRadiusPx,
+            useSubPixelRefinement = useSubPixelRefinement
+        ) ?: detectAnyStrikerOnBaseline(
+            bitmap = bitmap,
+            boardLeft = boardLeft,
+            boardTop = boardTop,
+            boardRight = boardRight,
+            boardBottom = boardBottom,
+            scaleX = scaleX,
+            scaleY = scaleY,
+            strikerRadiusPx = strikerRadiusPx,
+            sliderKnobPx = null,
+            scanTopFraction = 0.07f,
+            scanBottomFraction = 0.24f
+        )
+        return if (rawTop != null && useSubPixelRefinement) {
+            rawTop.copy(
+                center = CarromCircleRefiner.refinePieceCenterSubPixel(
+                    bitmap = bitmap,
+                    coarseCenterScreen = rawTop.center,
+                    expectedRadiusScreen = strikerRadiusPx,
+                    scaleX = scaleX,
+                    scaleY = scaleY
+                )
+            )
+        } else {
+            rawTop
+        }
     }
 
     private data class BoardBmBounds(

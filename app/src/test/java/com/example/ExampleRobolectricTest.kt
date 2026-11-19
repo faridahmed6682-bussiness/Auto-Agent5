@@ -1306,9 +1306,21 @@ class ExampleRobolectricTest {
             myCoinColor = com.example.game.CoinColor.WHITE,
             consecutiveOfflineWaits = 0
         )
-        org.junit.Assert.assertFalse(
-            "Actual match solver must NOT shoot during opponent turn",
-            matchOutcome is com.example.game.CarromVisionOutcome.SolvedShot
+        org.junit.Assert.assertTrue(
+            "Actual match solver must wait offline during opponent turn, got $matchOutcome",
+            matchOutcome is com.example.game.CarromVisionOutcome.WaitStillnessOrTurn
+        )
+
+        val matchOutcomeMidTurn = com.example.game.CarromVisionDetector.analyzeAndSolve(
+            screenshot = bm,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            consecutiveOfflineWaits = 4
+        )
+        org.junit.Assert.assertTrue(
+            "Opponent topStriker visible at consecutiveOfflineWaits=4 should stay offline WaitStillnessOrTurn (0 API), got $matchOutcomeMidTurn",
+            matchOutcomeMidTurn is com.example.game.CarromVisionOutcome.WaitStillnessOrTurn
         )
 
         bm.recycle()

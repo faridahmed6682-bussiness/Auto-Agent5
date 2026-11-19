@@ -698,7 +698,9 @@ class CarromShotMemoryStore(context: Context) {
                         newFrictionScale = (newFrictionScale + 0.04f).coerceIn(0.80f, 1.28f)
                         newJawBuffer = (newJawBuffer + 1.4f).coerceIn(0f, 10f)
                         newShotPowerGain = (newShotPowerGain + 0.03f).coerceIn(0.78f, 1.28f)
-                    } else if (pendingShot.powerStyle == CarromPowerStyle.HARD) {
+                    } else if (pendingShot.powerStyle == CarromPowerStyle.HARD ||
+                        (angleBucket == CarromAngleBucket.STRAIGHT && pendingShot.powerStyle != CarromPowerStyle.SOFT)
+                    ) {
                         newFrictionScale = (newFrictionScale - 0.03f).coerceIn(0.80f, 1.28f)
                         newShotPowerGain = (newShotPowerGain - 0.03f).coerceIn(0.78f, 1.28f)
                     } else {

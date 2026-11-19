@@ -63,6 +63,7 @@ class CarromTurnMemory {
     private var probeQueueInitialized = false
     private var _sliderMovesThisTurn: Int = 0
     private var bestEvaluatedThisTurn: CarromShotSolution? = null
+    private var returnedToBestSpot: Boolean = false
 
     val sliderMovesThisTurn: Int get() = _sliderMovesThisTurn
     val scanCount: Int get() = scanFrames.size
@@ -191,6 +192,22 @@ class CarromTurnMemory {
         }
     }
 
+    fun bestEvaluatedSpotToReturnTo(
+        currentStrikerX: Float?,
+        currentInPlaceConfidence: Float
+    ): Float? {
+        if (returnedToBestSpot || currentStrikerX == null) return null
+        val best = bestEvaluatedThisTurn ?: return null
+        if (best.rejectedDueToCollisionOrFoul || best.isBreakShot) return null
+        val dist = abs(best.strikerPos.x - currentStrikerX)
+        if (dist <= 54f) return null
+        return if (best.confidenceScore > currentInPlaceConfidence + 0.14f) best.strikerPos.x else null
+    }
+
+    fun markReturnedToBestSpot() {
+        returnedToBestSpot = true
+    }
+
     fun isSliderStalledOrOscillating(targetStrikerX: Float, currentStrikerX: Float): Boolean {
         if (visitedStrikerXs.size < 2) return false
         val lastPrev = visitedStrikerXs[visitedStrikerXs.size - 2]
@@ -300,7 +317,8 @@ class CarromTurnMemory {
         shotMemory: CarromMemoryData?,
         usePhysicsRollout: Boolean,
         fallbackSolution: CarromShotSolution,
-        isFreestyle: Boolean = false
+        isFreestyle: Boolean = false,
+        queenPendingCover: Boolean = false
     ): CarromShotSolution {
         val consensusPieces = buildConsensusPieces(latestPieces, board.coinRadiusPx)
         val combinedPieces = if (striker != null) consensusPieces + striker else consensusPieces
@@ -315,7 +333,8 @@ class CarromTurnMemory {
                 existingStriker = striker,
                 shotMemory = shotMemory,
                 usePhysicsRollout = usePhysicsRollout,
-                isFreestyle = isFreestyle
+                isFreestyle = isFreestyle,
+                queenPendingCover = queenPendingCover
             ) ?: fallbackSolution
         } else {
             fallbackSolution
@@ -369,5 +388,6 @@ class CarromTurnMemory {
         probeQueueInitialized = false
         _sliderMovesThisTurn = 0
         bestEvaluatedThisTurn = null
+        returnedToBestSpot = false
     }
 }
