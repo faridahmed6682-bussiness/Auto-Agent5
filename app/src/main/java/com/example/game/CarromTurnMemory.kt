@@ -8,16 +8,16 @@ enum class TurnProbeStage(val badge: String) {
     PROBING_SLIDER("PROBING"),
     LOCKED_SURE_SHOT("SURE SHOT"),
     CAROM_SURE_SHOT("CAROM SURE"),
-    FALLBACK_FIRE("6.4s BREAK/POT"),
+    FALLBACK_FIRE("8.2s SAFE SHOT"),
     WATCH_TRAINING("WATCH TRAIN")
 }
 
 data class CarromTurnHudState(
     val isActive: Boolean = false,
     val elapsedSec: Float = 0f,
-    val maxSec: Float = 7.0f,
+    val maxSec: Float = 9.0f,
     val probeNumber: Int = 0,
-    val maxProbes: Int = 6,
+    val maxProbes: Int = 4,
     val scanCount: Int = 0,
     val rejectedCount: Int = 0,
     val stage: TurnProbeStage = TurnProbeStage.PRE_SCAN,
@@ -25,24 +25,24 @@ data class CarromTurnHudState(
 )
 
 /**
- * Per-Turn Working Memory, Ranked 6-Spot Striker Probe Queue & 7-Second Turn Shot Clock.
+ * Per-Turn Working Memory, Ranked 4-Spot Side-to-Side Striker Probe Queue & 9-Second Turn Shot Clock.
  *
  * 1. Scans the whole board before moving and stabilizes piece coordinates across frames.
- * 2. Holds up to 6 physics-ranked baseline X candidate positions.
- * 3. Rejects colliding spots that miss or foul and slides to the next candidate spot (up to 6 moves).
- * 4. Accepts collision-assisted shots that STILL cleanly sink our coin/Queen without foul as Sure Shots.
- * 5. Enforces a 6.35s fallback deadline so the safest zero-foul break/pot fires before the 7.0s turn clock expires.
+ * 2. Holds up to 4 physics + training-ranked baseline X candidate positions spread side-to-side.
+ * 3. Rejects colliding/foul spots and slides across the baseline (3-4 moves) until a zero-foul Sure Shot locks.
+ * 4. Accepts collision-assisted shots that STILL cleanly sink our coin/Queen without striker scratch as Sure Shots.
+ * 5. Enforces an 8.2s fallback deadline so the safest zero-foul shot fires within 8-9 seconds.
  */
 class CarromTurnMemory {
 
     companion object {
-        const val MAX_TURN_BUDGET_MS = 7_000L
-        const val FALLBACK_FIRE_ELAPSED_MS = 6_350L
-        const val MAX_BASELINE_PROBES = 6
-        private const val LIVE_FIRE_RESERVE_MS = 950L
-        private const val A11Y_FIRE_RESERVE_MS = 1_900L
+        const val MAX_TURN_BUDGET_MS = 9_000L
+        const val FALLBACK_FIRE_ELAPSED_MS = 8_200L
+        const val MAX_BASELINE_PROBES = 4
+        private const val LIVE_FIRE_RESERVE_MS = 850L
+        private const val A11Y_FIRE_RESERVE_MS = 1_500L
         private const val MAX_STORED_SCANS = 20
-        private const val SPOT_MATCH_TOLERANCE_PX = 20f
+        private const val SPOT_MATCH_TOLERANCE_PX = 28f
     }
 
     data class TurnScanFrame(
@@ -345,12 +345,12 @@ class CarromTurnMemory {
         val status = when {
             sol.isCollisionAssistedSureShot -> "CAROM-SURE"
             sol.isSureShot -> "SURE"
-            sol.isBreakShot -> "BREAK-6.4s"
-            else -> "BEST-6.4s"
+            sol.isBreakShot -> "BREAK-8.2s"
+            else -> "BEST-8.2s"
         }
         return String.format(
             java.util.Locale.US,
-            "[7s Clock %.1fs/7.0s | Probe %d/%d (%d rej) | %s]",
+            "[9s Clock %.1fs/9.0s | Probe %d/%d (%d rej) | %s]",
             sec,
             (_sliderMovesThisTurn + 1).coerceAtMost(MAX_BASELINE_PROBES),
             totalPlannedProbes.coerceAtLeast(1).coerceAtMost(MAX_BASELINE_PROBES),

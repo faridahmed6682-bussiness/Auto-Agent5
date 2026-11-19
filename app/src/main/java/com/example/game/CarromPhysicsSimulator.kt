@@ -122,7 +122,7 @@ object CarromPhysicsSimulator {
 
         val topCandidates = safeCandidates
             .sortedByDescending { it.staticScore }
-            .take(8)
+            .take(14)
 
         val frictionScale = matchCalibration?.frictionScale ?: 1.0f
         val jawSafetyBuffer = matchCalibration?.pocketJawSafetyBuffer ?: 0f
@@ -138,9 +138,9 @@ object CarromPhysicsSimulator {
                 floatArrayOf(-1.4f, -0.7f, 0f, 0.7f, 1.4f)
             }
             val powerFactors = if (candidate.isBankShot || candidate.isComboShot) {
-                floatArrayOf(0.92f, 1.04f, 1.16f)
+                floatArrayOf(0.88f, 0.98f, 1.08f, 1.20f)
             } else {
-                floatArrayOf(0.88f, 1.0f, 1.12f)
+                floatArrayOf(0.85f, 0.95f, 1.05f, 1.17f)
             }
 
             var bestLocalScore = Float.NEGATIVE_INFINITY
@@ -241,6 +241,38 @@ object CarromPhysicsSimulator {
                     !oppOnly
                 if (cleanPot || (candidate.isBreakShot && !neighborOutcome.strikerScratched)) {
                     safeNeighbors++
+                }
+            }
+            // Power-jitter scratch guard: ensure +/-12% swipe speed error does not drop striker into any pocket
+            if (!anyNeighborScratched && !chosenOutcome.strikerScratched) {
+                val powerJitterFactors = floatArrayOf(0.88f, 1.12f)
+                val jitterDir = rotateVector(candidate.baseDir, bestAngleDeg)
+                for (pj in powerJitterFactors) {
+                    val jitterSpeed = computeInitialSpeedPx(
+                        board = board,
+                        cutAngleDeg = candidate.cutAngleDeg,
+                        totalDistance = candidate.totalDistance,
+                        pullMultiplier = candidate.basePullMultiplier * bestPowerFactor * pj * shotPowerGain,
+                        frictionScale = frictionScale
+                    )
+                    totalRollouts++
+                    val pjOutcome = runSingleRollout(
+                        board = board,
+                        pieces = pieces,
+                        strikerPos = candidate.strikerPos,
+                        shotDir = jitterDir,
+                        initialSpeed = jitterSpeed,
+                        targetCoin = candidate.targetCoin,
+                        myCoinColor = myCoinColor,
+                        frictionScale = frictionScale,
+                        jawSafetyBuffer = jawSafetyBuffer,
+                        extraScratchGuard = extraScratchGuard,
+                        isFreestyle = isFreestyle
+                    )
+                    if (pjOutcome.strikerScratched) {
+                        anyNeighborScratched = true
+                        break
+                    }
                 }
             }
             val robustness = if (neighborTotal > 0) safeNeighbors.toFloat() / neighborTotal else 0.5f
@@ -454,16 +486,46 @@ object CarromPhysicsSimulator {
             }
         }
 
-        // Sort prioritized by Sure Shot flag, then score descending, and enforce minimum X spacing
+        // Sort prioritized by Sure Shot flag, then score descending, and pick spots spread side-to-side
         val sorted = evaluatedSpots.sortedWith(
             compareByDescending<RankedBaselineSpot> { it.predictedSureShot }
                 .thenByDescending { it.predictedScore }
         )
         val picked = ArrayList<RankedBaselineSpot>(maxSpots)
+        // First lock any high-confidence Sure Shot spots (keeping minSeparationPx)
         for (spot in sorted) {
+            if (!spot.predictedSureShot) break
             if (picked.none { abs(it.strikerX - spot.strikerX) < minSeparationPx }) {
                 picked.add(spot)
                 if (picked.size >= maxSpots) break
+            }
+        }
+        // For remaining probe slots, deliberately spread across Left / Mid / Right sectors ("এপাশ থেকে ওপাশ")
+        if (picked.size < maxSpots) {
+            fun sectorOf(x: Float): Int {
+                val norm = ((x - board.left) / board.width).coerceIn(0f, 1f)
+                return when {
+                    norm < 0.38f -> 0
+                    norm > 0.62f -> 2
+                    else -> 1
+                }
+            }
+            val coveredSectors = picked.mapTo(HashSet()) { sectorOf(it.strikerX) }
+            // First pass: pick highest-scoring spot in each uncovered sector (opposite sides first)
+            for (spot in sorted) {
+                if (picked.size >= maxSpots) break
+                val sec = sectorOf(spot.strikerX)
+                if (sec !in coveredSectors && picked.none { abs(it.strikerX - spot.strikerX) < minSeparationPx }) {
+                    picked.add(spot)
+                    coveredSectors.add(sec)
+                }
+            }
+            // Second pass: fill any remaining slots with best remaining well-separated spots
+            for (spot in sorted) {
+                if (picked.size >= maxSpots) break
+                if (picked.none { abs(it.strikerX - spot.strikerX) < minSeparationPx }) {
+                    picked.add(spot)
+                }
             }
         }
         return picked
@@ -520,7 +582,7 @@ object CarromPhysicsSimulator {
         }
 
         val coinCaptureRadius = (board.pocketRadiusPx - jawSafetyBuffer).coerceAtLeast(board.coinRadiusPx * 1.12f)
-        val strikerCaptureRadius = board.pocketRadiusPx * (if (extraScratchGuard) 1.22f else 1.10f)
+        val strikerCaptureRadius = board.pocketRadiusPx * (if (extraScratchGuard) 1.26f else 1.15f)
 
         // Friction deceleration in px/step calibrated so medium shots traverse ~1.5-1.8 * board.width
         val frictionDecelPerStep = board.width * 0.0042f * frictionScale.coerceIn(0.75f, 1.35f)

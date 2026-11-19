@@ -1453,53 +1453,132 @@ class AgentLogicUnitTest {
     }
 
     @Test
-    fun `turn memory enforces 7s clock allows up to 6 slides in budget and fuses multi-frame scans`() {
+    fun `turn memory enforces 9s clock allows up to 4 side-to-side slides in budget and fuses multi-frame scans`() {
         val tm = com.example.game.CarromTurnMemory()
         val t0 = 10_000L
 
-        assertEquals(7_000L, com.example.game.CarromTurnMemory.MAX_TURN_BUDGET_MS)
-        assertEquals(6_350L, com.example.game.CarromTurnMemory.FALLBACK_FIRE_ELAPSED_MS)
-        assertEquals(6, com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES)
+        assertEquals(9_000L, com.example.game.CarromTurnMemory.MAX_TURN_BUDGET_MS)
+        assertEquals(8_200L, com.example.game.CarromTurnMemory.FALLBACK_FIRE_ELAPSED_MS)
+        assertEquals(4, com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES)
 
         val coin1Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(300f, 700f), 28f)
         val coin2Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, com.example.game.Point2D(600f, 800f), 28f)
         val striker1 = com.example.game.CarromPiece(com.example.game.CoinColor.STRIKER, com.example.game.Point2D(540f, 1320f), 35f)
 
-        // Frame 1 (pre-slide): can slide while under 6 moves and within 7s budget
+        // Frame 1 (pre-slide): can slide while under 4 moves and within 9s budget
         tm.recordObservation(t0, listOf(coin1Frame1, coin2Frame1), striker1, com.example.game.Point2D(540f, 1600f), null, null)
         assertTrue(tm.canAffordAnotherSliderMove(t0 + 1_000L, isLiveStreamActive = true))
         tm.recordSliderMoveDispatched(540f)
 
         // Frame 2 (after slide #1): slight jitter on coin1, slider gain refined
         val coin1Frame2 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(304f, 698f), 28f)
-        tm.recordObservation(t0 + 1_200L, listOf(coin1Frame2, coin2Frame1), striker1.copy(center = com.example.game.Point2D(420f, 1320f)), com.example.game.Point2D(420f, 1600f), null, 0.92f)
+        tm.recordObservation(t0 + 1_200L, listOf(coin1Frame2, coin2Frame1), striker1.copy(center = com.example.game.Point2D(250f, 1320f)), com.example.game.Point2D(250f, 1600f), null, 0.92f)
         assertTrue(tm.canAffordAnotherSliderMove(t0 + 3_500L, isLiveStreamActive = true))
-        tm.recordSliderMoveDispatched(420f)
-        tm.recordSliderMoveDispatched(360f)
-        tm.recordSliderMoveDispatched(330f)
-        assertEquals(4, tm.sliderMovesThisTurn)
+        tm.recordSliderMoveDispatched(250f)
 
         // Frame 3: coin2 temporarily missed by glare -> consensus fusion still preserves coin2 AND averages coin1
-        tm.recordObservation(t0 + 4_000L, listOf(coin1Frame1), striker1.copy(center = com.example.game.Point2D(310f, 1320f)), com.example.game.Point2D(310f, 1600f), null, 0.94f)
+        tm.recordObservation(t0 + 4_000L, listOf(coin1Frame1), striker1.copy(center = com.example.game.Point2D(810f, 1320f)), com.example.game.Point2D(810f, 1600f), null, 0.94f)
         val fused = tm.buildConsensusPieces(listOf(coin1Frame1), coinRadiusPx = 28f)
         assertEquals(2, fused.size)
         val fusedWhite = fused.first { it.color == com.example.game.CoinColor.WHITE }
         assertTrue("Expected stabilized X between 300 and 304, got ${fusedWhite.center.x}", fusedWhite.center.x in 300.1f..303.5f)
 
-        // Still within 7s live-stream reserve at 5.8s, but cut off at 6.4s (live) and 5.2s (non-live)
-        assertTrue(tm.canAffordAnotherSliderMove(t0 + 5_800L, isLiveStreamActive = true))
-        assertFalse(tm.canAffordAnotherSliderMove(t0 + 6_400L, isLiveStreamActive = true))
-        assertFalse(tm.canAffordAnotherSliderMove(t0 + 5_200L, isLiveStreamActive = false))
+        // Still within 9s live-stream reserve at 7.6s, but cut off at 8.3s (live) and 7.7s (non-live)
+        assertTrue(tm.canAffordAnotherSliderMove(t0 + 7_600L, isLiveStreamActive = true))
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 8_300L, isLiveStreamActive = true))
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 7_700L, isLiveStreamActive = false))
 
-        // Hard 6-move cap blocks a 7th slide even early in the turn
-        tm.recordSliderMoveDispatched(300f)
-        tm.recordSliderMoveDispatched(280f)
-        assertEquals(6, tm.sliderMovesThisTurn)
+        // Hard 4-move cap blocks a 5th slide even early in the turn
+        tm.recordSliderMoveDispatched(810f)
+        tm.recordSliderMoveDispatched(380f)
+        assertEquals(4, tm.sliderMovesThisTurn)
         assertFalse(tm.canAffordAnotherSliderMove(t0 + 4_500L, isLiveStreamActive = true))
 
         tm.resetTurn()
         assertFalse(tm.isTurnActive)
         assertEquals(0, tm.sliderMovesThisTurn)
+    }
+
+    @Test
+    fun `combined engine and skewed training data still finds zero-foul sure shot and spreads probes side to side`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f),  // 0: top-left
+                com.example.game.Point2D(960f, 560f),  // 1: top-right
+                com.example.game.Point2D(120f, 1400f), // 2: bottom-left
+                com.example.game.Point2D(960f, 1400f)  // 3: bottom-right
+            ),
+            baselineY = 1320f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+        val striker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(540f, 1320f),
+            radiusPx = 35f
+        )
+        val whiteCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(245f, 685f),
+            radiusPx = 28f
+        )
+        val blackBlocker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(690f, 920f),
+            radiusPx = 28f
+        )
+
+        // Skewed training data: very soft learnedPowerScale (0.72f) + negative confidence bias on pocket 0
+        val key = com.example.game.CarromMemoryData.bucketKey(0, com.example.game.CarromAngleBucket.MEDIUM_CUT)
+        val skewedMemory = com.example.game.CarromMemoryData(
+            statsByBucket = mapOf(
+                key to com.example.game.PocketShotStats(
+                    key = key,
+                    pocketIndex = 0,
+                    angleBucket = com.example.game.CarromAngleBucket.MEDIUM_CUT,
+                    attempts = 4,
+                    successes = 0,
+                    fouls = 0,
+                    misses = 4,
+                    learnedPowerScale = 0.72f
+                )
+            )
+        )
+
+        val sol = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = listOf(whiteCoin, blackBlocker, striker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            existingStriker = striker,
+            canRepositionStriker = true,
+            shotMemory = skewedMemory,
+            usePhysicsRollout = true
+        )
+        org.junit.Assert.assertNotNull(sol)
+        assertTrue("Expected engine + training data together to find zero-foul Sure Shot, got ${sol!!.reason}", sol.isSureShot)
+        assertFalse(sol.rejectedDueToCollisionOrFoul)
+
+        // Side-to-side probe queue should have <= 4 well-separated spots
+        val probes = com.example.game.CarromGeometrySolver.buildRankedBaselineProbeQueue(
+            board = board,
+            pieces = listOf(whiteCoin, blackBlocker, striker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            existingStriker = striker,
+            shotMemory = skewedMemory,
+            maxProbes = com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES
+        )
+        assertTrue("Expected 1..4 probes, got ${probes.size}", probes.size in 1..4)
+        if (probes.size >= 2) {
+            val minGap = probes.zipWithNext().minOf { (a, b) -> kotlin.math.abs(a.strikerX - b.strikerX) }
+            assertTrue("Expected probes spaced side-to-side (>= 100px), minGap=$minGap", minGap >= 100f)
+        }
     }
 
     @Test

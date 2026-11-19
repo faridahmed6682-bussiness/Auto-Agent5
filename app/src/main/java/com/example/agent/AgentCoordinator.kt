@@ -1240,14 +1240,14 @@ object AgentCoordinator {
 
                                     val isVerifiedSureHere = inPlaceSol != null && inPlaceSol.isSureShot
 
-                                    // Check if a closed-loop correction slide is needed to reach an intended queued spot
+                                    // Check if a closed-loop correction slide is needed to reach an intended queued spot (only if seriously off target)
                                     val needsClosedLoopCorrection = !isVerifiedSureHere &&
                                         canAffordSlide &&
                                         currentSettings.useClosedLoopSliderVerify &&
                                         verifyState != null &&
-                                        verifyState.correctionAttempts < 2 &&
+                                        verifyState.correctionAttempts < 1 &&
                                         striker != null &&
-                                        kotlin.math.abs(verifyState.targetStrikerX - striker.center.x) > 24f &&
+                                        kotlin.math.abs(verifyState.targetStrikerX - striker.center.x) > 54f &&
                                         !carromTurnMemory.isSliderStalledOrOscillating(verifyState.targetStrikerX, striker.center.x)
 
                                     var nextProbeTargetX: Float? = null

@@ -510,10 +510,10 @@ object CarromContextHelper {
             topicTitle = if (isFreestyle) "Carrom Freestyle" else "Carrom Disc Pool",
             rulesSummary = ruleDesc,
             winningStrategies = listOf(
-                "Pre-scan board and rank top 6 baseline striker X spots before sliding.",
-                "Slide bottom slider knob to probe candidate spots (up to 6 moves) until physics verifies a Sure Shot.",
+                "Pre-scan board and rank up to 4 side-to-side baseline striker X spots before sliding.",
+                "Slide bottom slider knob side-to-side (3-4 probes) using engine + training data until a zero-foul Sure Shot locks.",
                 "Accept collision-assisted carom shots when they still pocket a valid coin cleanly with zero striker scratch.",
-                "Pull slingshot opposite to pocket vector from striker center; shoot safest zero-foul break/pot before 7.0s cutoff."
+                "Pull slingshot opposite to pocket vector from striker center; shoot safest zero-foul Sure/Safe shot within 8-9s."
             ),
             foulLessons = listOf(
                 "Striker falling into any pocket is a foul — reject straight scratch trajectories via 2D physics rollout.",

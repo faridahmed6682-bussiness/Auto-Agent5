@@ -265,7 +265,8 @@ object CarromGeometrySolver {
         }
 
         var directRejectedByPhysics = false
-        if (usePhysicsRollout && directPool.isNotEmpty() && (bestDirect == null || bestDirect.confidenceScore >= 0.52f)) {
+        var bestNonSureDirectVerified: CarromShotSolution? = null
+        if (usePhysicsRollout && directPool.isNotEmpty() && (bestDirect == null || bestDirect.confidenceScore >= 0.45f)) {
             val verified = refineWithPhysicsRollout(
                 board = board,
                 pieces = pieces,
@@ -276,15 +277,18 @@ object CarromGeometrySolver {
                 shotMemory = shotMemory,
                 isFreestyle = isFreestyle
             )
-            if (verified != null && (verified.confidenceScore >= 0.56f || bestDirect == null)) {
+            if (verified != null && verified.isSureShot) {
                 return verified
+            }
+            if (verified != null && !verified.rejectedDueToCollisionOrFoul) {
+                bestNonSureDirectVerified = verified
             }
             if (verified == null) {
                 directRejectedByPhysics = true
             }
         }
 
-        if (!directRejectedByPhysics && bestDirect != null && bestDirect.confidenceScore >= 0.58f) {
+        if (!usePhysicsRollout && bestDirect != null && bestDirect.confidenceScore >= 0.58f) {
             return bestDirect
         }
 
@@ -313,8 +317,13 @@ object CarromGeometrySolver {
                 shotMemory = shotMemory,
                 isFreestyle = isFreestyle
             )
-            if (verifiedBankOrDirect != null && verifiedBankOrDirect.confidenceScore >= 0.52f) {
+            if (verifiedBankOrDirect != null && verifiedBankOrDirect.isSureShot) {
                 return verifiedBankOrDirect
+            }
+            if (verifiedBankOrDirect != null && !verifiedBankOrDirect.rejectedDueToCollisionOrFoul &&
+                (bestNonSureDirectVerified == null || verifiedBankOrDirect.confidenceScore > bestNonSureDirectVerified.confidenceScore)
+            ) {
+                bestNonSureDirectVerified = verifiedBankOrDirect
             }
         }
 
@@ -341,20 +350,55 @@ object CarromGeometrySolver {
             shotMemory = shotMemory,
             outCandidates = comboPool
         )
-        if (usePhysicsRollout && comboPool.isNotEmpty()) {
+        if (usePhysicsRollout && (directPool.isNotEmpty() || bankPool.isNotEmpty() || comboPool.isNotEmpty())) {
+            val allEnginePool = directPool + comboPool + bankPool
             val verifiedCombo = refineWithPhysicsRollout(
                 board = board,
                 pieces = pieces,
                 myCoinColor = myCoinColor,
-                candidates = directPool + comboPool + bankPool,
+                candidates = allEnginePool,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
                 shotMemory = shotMemory,
                 isFreestyle = isFreestyle
             )
-            if (verifiedCombo != null && (verifiedCombo.isSureShot || verifiedCombo.confidenceScore >= 0.50f)) {
+            if (verifiedCombo != null && (verifiedCombo.isSureShot || (!verifiedCombo.rejectedDueToCollisionOrFoul && verifiedCombo.confidenceScore >= 0.52f))) {
                 return verifiedCombo
             }
+            // Training-data calibration fallback: if training power/bias prevented a Sure Shot, re-test with neutral engine power (still obeying foul blacklists!)
+            if (shotMemory != null && allEnginePool.isNotEmpty()) {
+                val neutralPool = allEnginePool.map { cand ->
+                    val defaultMult = when {
+                        cand.isBankShot -> 1.24f
+                        cand.isComboShot -> 1.26f
+                        cand.totalDistance <= board.coinRadiusPx * 10f -> 0.88f
+                        else -> 1.0f
+                    }
+                    cand.copy(basePullMultiplier = defaultMult)
+                }
+                val engineFallbackShot = refineWithPhysicsRollout(
+                    board = board,
+                    pieces = pieces,
+                    myCoinColor = myCoinColor,
+                    candidates = neutralPool,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight,
+                    shotMemory = shotMemory,
+                    isFreestyle = isFreestyle
+                )
+                if (engineFallbackShot != null && engineFallbackShot.isSureShot) {
+                    return engineFallbackShot
+                }
+                if (bestNonSureDirectVerified != null && bestNonSureDirectVerified.confidenceScore >= 0.50f) {
+                    return bestNonSureDirectVerified
+                }
+                if (engineFallbackShot != null && !engineFallbackShot.rejectedDueToCollisionOrFoul && engineFallbackShot.confidenceScore >= 0.50f) {
+                    return engineFallbackShot
+                }
+            }
+        }
+        if (usePhysicsRollout && bestNonSureDirectVerified != null && bestNonSureDirectVerified.confidenceScore >= 0.50f) {
+            return bestNonSureDirectVerified
         }
         if (!usePhysicsRollout) {
             if (bestCombo != null && (bestDirectOrBank == null || bestCombo.confidenceScore > bestDirectOrBank.confidenceScore)) {
@@ -528,7 +572,8 @@ object CarromGeometrySolver {
             outCandidates = pool
         )
 
-        return CarromPhysicsSimulator.rankTopBaselinePositions(
+        val minProbeSep = max(board.width * 0.14f, board.strikerRadiusPx * 2.2f)
+        val ranked = CarromPhysicsSimulator.rankTopBaselinePositions(
             board = board,
             pieces = pieces,
             myCoinColor = myCoinColor,
@@ -536,8 +581,46 @@ object CarromGeometrySolver {
             shotMemory = shotMemory,
             matchCalibration = shotMemory?.matchCalibration,
             maxSpots = maxProbes,
+            minSeparationPx = minProbeSep,
             isFreestyle = isFreestyle
-        )
+        ).toMutableList()
+
+        // Ensure up to 3-4 side-to-side baseline spots exist if no predicted Sure Shot was locked yet
+        if (ranked.none { it.predictedSureShot } && ranked.size < maxProbes) {
+            val margin = board.strikerRadiusPx * 2.1f
+            val minX = board.left + margin
+            val maxX = board.right - margin
+            val currentX = existingStriker?.center?.x ?: (board.left + board.width * 0.5f)
+            val anchorNorms = if (currentX < board.left + board.width * 0.5f) {
+                listOf(0.82f, 0.20f, 0.64f, 0.38f)
+            } else {
+                listOf(0.18f, 0.80f, 0.36f, 0.62f)
+            }
+            val fallbackCoin = targetPieces.firstOrNull() ?: obstacles.firstOrNull()
+            if (fallbackCoin != null && maxX > minX) {
+                for (norm in anchorNorms) {
+                    if (ranked.size >= maxProbes) break
+                    val candX = (board.left + board.width * norm).coerceIn(minX, maxX)
+                    val pos = Point2D(candX, board.baselineY)
+                    val free = isPositionFree(pos, obstacles, board.coinRadiusPx + board.strikerRadiusPx * 0.95f)
+                    val distinctFromRanked = ranked.none { abs(it.strikerX - candX) < minProbeSep * 0.75f }
+                    val distinctFromCurrent = abs(candX - currentX) >= minProbeSep * 0.55f
+                    if (free && distinctFromRanked && distinctFromCurrent) {
+                        ranked.add(
+                            RankedBaselineSpot(
+                                strikerX = candX,
+                                predictedScore = 0.30f,
+                                predictedSureShot = false,
+                                collisionAssisted = false,
+                                targetCoinColor = fallbackCoin.color,
+                                pocketIndex = if (norm < 0.5f) 0 else 1
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        return ranked
     }
 
     /**
@@ -1016,16 +1099,14 @@ object CarromGeometrySolver {
             }
         }
 
-        // Safe zero-scratch fallback sweep if direct anchor direction failed scratch guard
+        // Safe zero-scratch fallback sweep across angles if direct anchor direction failed scratch guard
         if (bestBreak == null) {
             val strikerPos = strikerCandidates.first()
-            val candidateDirs = listOf(
-                Point2D(0.18f, -0.98f).normalized(),
-                Point2D(-0.18f, -0.98f).normalized(),
-                Point2D(0.35f, -0.93f).normalized(),
-                Point2D(-0.35f, -0.93f).normalized(),
-                Point2D(0f, -1f)
-            )
+            val sweepAnglesDeg = floatArrayOf(0f, -10f, 10f, -20f, 20f, -32f, 32f, -45f, 45f, -58f, 58f, -68f, 68f)
+            val candidateDirs = sweepAnglesDeg.map { deg ->
+                val rad = deg * (PI / 180.0)
+                Point2D(kotlin.math.sin(rad).toFloat(), (-kotlin.math.cos(rad)).toFloat()).normalized()
+            }
             val safeDir = candidateDirs.firstOrNull { candDir ->
                 CarromPhysicsSimulator.isBreakTrajectoryScratchFree(
                     board = board,
@@ -1147,8 +1228,8 @@ object CarromGeometrySolver {
         val followMult = if (extraSafetyMargin) 1.48f else 1.32f
         val deflectMult = if (extraSafetyMargin) 1.34f else 1.22f
 
-        // 1. Nearly straight follow-through (< 11 deg): striker continues roughly along dirSg
-        if (cutAngleDeg < 11f) {
+        // 1. Nearly straight follow-through (< 16 deg): striker continues roughly along dirSg
+        if (cutAngleDeg < 16f) {
             val followEnd = ghostBall + dirSg * (board.width * 0.95f)
             for (pocket in board.pockets) {
                 if (distancePointToSegment(pocket, ghostBall, followEnd) < board.pocketRadiusPx * followMult) {
