@@ -85,6 +85,15 @@ object LiveMediaProjectionCapturer {
             reader.setOnImageAvailableListener({ r ->
                 val image = runCatching { r.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
                 try {
+                    val nowPre = SystemClock.uptimeMillis()
+                    val shouldSkipIdleFrame = synchronized(lock) {
+                        nextFrameWaiter == null &&
+                            latestBitmap != null &&
+                            (nowPre - latestTimestampMs) < 65L
+                    }
+                    if (shouldSkipIdleFrame) {
+                        return@setOnImageAvailableListener
+                    }
                     val planes = image.planes
                     if (planes.isEmpty()) return@setOnImageAvailableListener
                     val plane = planes[0]

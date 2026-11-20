@@ -434,6 +434,9 @@ object AgentCoordinator {
                 var movedStrikerThisTurn = false
                 var pendingSliderVerify: PendingSliderVerify? = null
                 var pendingCarromShot: PendingCarromShotRecord? = null
+                var consecutiveUnregisteredCarromShots = 0
+                var lastShotAttemptStrikerX: Float? = null
+                var lastShotPrePieces: List<com.example.game.CarromPiece> = emptyList()
                 var queenPendingCover = false
                 val carromTurnMemory = CarromTurnMemory()
                 val awaitingRepliesByPeer = mutableMapOf<String, ChatTurnGuard.AwaitingReplyState>()
@@ -1131,34 +1134,58 @@ object AgentCoordinator {
                                         myCoinColor = prevShot.myCoinColor
                                     )
                                 }
-                                if (postCounts != null) {
-                                    val eval = carromShotMemoryStore?.recordShotOutcome(prevShot, postCounts)
-                                    pendingCarromShot = null
-                                    if (eval?.outcomeType == CarromShotOutcomeType.POCKETED_QUEEN &&
-                                        !prevShot.isFreestyle &&
-                                        postCounts.myCount > 0
-                                    ) {
-                                        queenPendingCover = true
-                                    } else {
-                                        queenPendingCover = false
+                                val strikerStayedPut = outcome is CarromVisionOutcome.SolvedShot &&
+                                    outcome.detectedStriker != null &&
+                                    lastShotAttemptStrikerX != null &&
+                                    kotlin.math.abs(outcome.detectedStriker.center.x - lastShotAttemptStrikerX!!) <= 16f
+                                val coinsUnmoved = outcome is CarromVisionOutcome.SolvedShot &&
+                                    postCounts == prevShot.preCounts &&
+                                    lastShotPrePieces.isNotEmpty() &&
+                                    lastShotPrePieces.filter { it.color != CoinColor.STRIKER }.all { pre ->
+                                        outcome.boardPieces.any { cur ->
+                                            cur.color == pre.color &&
+                                                kotlin.math.hypot(cur.center.x - pre.center.x, cur.center.y - pre.center.y) <= outcome.board.coinRadiusPx * 0.55f
+                                        }
                                     }
-                                    if (eval != null) {
-                                        lastOutcomeHint = "${eval.summaryMessage} $lastOutcomeHint"
-                                        workingMemory = eval.summaryMessage
-                                        if (eval.learnedTacticLesson != null || eval.learnedFoulLesson != null) {
-                                            val pbKey = activePlaybook?.topicKey ?: "carrom_board_game"
-                                            val updatedPb = knowledgeStore?.recordStepLearning(
-                                                topicKey = pbKey,
-                                                fallbackTopicTitle = activePlaybook?.topicTitle ?: "Carrom Board Game",
-                                                newStrategy = eval.learnedTacticLesson,
-                                                newFoulLesson = eval.learnedFoulLesson
-                                            )
-                                            if (updatedPb != null) {
-                                                activePlaybook = updatedPb
+                                if (strikerStayedPut && coinsUnmoved && consecutiveUnregisteredCarromShots < 2) {
+                                    pendingCarromShot = null
+                                    consecutiveUnregisteredCarromShots++
+                                    lastOutcomeHint = "[Carrom shot drag left board static (attempt #$consecutiveUnregisteredCarromShots) — recalibrating striker grab Y/duration] $lastOutcomeHint"
+                                } else {
+                                    consecutiveUnregisteredCarromShots = 0
+                                    lastShotAttemptStrikerX = null
+                                    lastShotPrePieces = emptyList()
+                                    if (postCounts != null) {
+                                        val eval = carromShotMemoryStore?.recordShotOutcome(prevShot, postCounts)
+                                        pendingCarromShot = null
+                                        if (eval?.outcomeType == CarromShotOutcomeType.POCKETED_QUEEN &&
+                                            !prevShot.isFreestyle &&
+                                            postCounts.myCount > 0
+                                        ) {
+                                            queenPendingCover = true
+                                        } else {
+                                            queenPendingCover = false
+                                        }
+                                        if (eval != null) {
+                                            lastOutcomeHint = "${eval.summaryMessage} $lastOutcomeHint"
+                                            workingMemory = eval.summaryMessage
+                                            if (eval.learnedTacticLesson != null || eval.learnedFoulLesson != null) {
+                                                val pbKey = activePlaybook?.topicKey ?: "carrom_board_game"
+                                                val updatedPb = knowledgeStore?.recordStepLearning(
+                                                    topicKey = pbKey,
+                                                    fallbackTopicTitle = activePlaybook?.topicTitle ?: "Carrom Board Game",
+                                                    newStrategy = eval.learnedTacticLesson,
+                                                    newFoulLesson = eval.learnedFoulLesson
+                                                )
+                                                if (updatedPb != null) {
+                                                    activePlaybook = updatedPb
+                                                }
                                             }
                                         }
                                     }
                                 }
+                            } else if (prevShot != null && isMovingWait) {
+                                consecutiveUnregisteredCarromShots = 0
                             }
                             if (queenPendingCover) {
                                 val visiblePieces = when (outcome) {
@@ -1275,14 +1302,14 @@ object AgentCoordinator {
 
                                     val isVerifiedSureHere = inPlaceSol != null && inPlaceSol.isSureShot
 
-                                    // Check if a closed-loop correction slide is needed to reach an intended queued spot (only if seriously off target)
+                                    val minCorrectionPx = (outcome.board.width * 0.055f).coerceIn(28f, 54f)
                                     val needsClosedLoopCorrection = !isVerifiedSureHere &&
                                         canAffordSlide &&
                                         currentSettings.useClosedLoopSliderVerify &&
                                         verifyState != null &&
                                         verifyState.correctionAttempts < 1 &&
                                         striker != null &&
-                                        kotlin.math.abs(verifyState.targetStrikerX - striker.center.x) > 54f &&
+                                        kotlin.math.abs(verifyState.targetStrikerX - striker.center.x) > minCorrectionPx &&
                                         !carromTurnMemory.isSliderStalledOrOscillating(verifyState.targetStrikerX, striker.center.x)
 
                                     var nextProbeTargetX: Float? = null
@@ -1300,7 +1327,8 @@ object AgentCoordinator {
                                             if (nextProbeTargetX == null) {
                                                 val returnX = carromTurnMemory.bestEvaluatedSpotToReturnTo(
                                                     currentStrikerX = striker.center.x,
-                                                    currentInPlaceConfidence = inPlaceSol?.confidenceScore ?: 0f
+                                                    currentInPlaceConfidence = inPlaceSol?.confidenceScore ?: 0f,
+                                                    minShiftPx = minCorrectionPx
                                                 )
                                                 if (returnX != null) {
                                                     nextProbeTargetX = returnX
@@ -1399,13 +1427,21 @@ object AgentCoordinator {
                                         val telemetry = carromTurnMemory.formatTurnTelemetry(nowCarromMs, finalSol)
                                         carromTurnMemory.resetTurn()
 
+                                        val retryYOffset = when (consecutiveUnregisteredCarromShots) {
+                                            1 -> -outcome.board.strikerRadiusPx * 0.42f
+                                            2 -> outcome.board.strikerRadiusPx * 0.42f
+                                            else -> 0f
+                                        }
                                         val shootStartX = striker?.center?.x ?: finalSol.strikerPos.x
-                                        val shootStartY = striker?.center?.y ?: finalSol.strikerPos.y
+                                        val shootStartY = ((striker?.center?.y ?: finalSol.strikerPos.y) + retryYOffset)
+                                            .coerceIn(outcome.board.top + outcome.board.height * 0.70f, outcome.board.bottom - outcome.board.strikerRadiusPx)
                                         val strikerNormX = ((shootStartX - outcome.board.left) / outcome.board.width).coerceIn(0f, 1f)
                                         val (coinRowZone, coinColZone) = CarromMemoryData.coinZoneFor(finalSol.targetCoin.center, outcome.board)
 
-                                        if (consensusPieces.isNotEmpty() || outcome.boardPieces.isNotEmpty()) {
-                                            val countSource = consensusPieces.ifEmpty { outcome.boardPieces }
+                                        val countSource = consensusPieces.ifEmpty { outcome.boardPieces }
+                                        lastShotPrePieces = countSource
+                                        lastShotAttemptStrikerX = shootStartX
+                                        if (countSource.isNotEmpty()) {
                                             nextPendingCarromShotCandidate = PendingCarromShotRecord(
                                                 myCoinColor = myCarromCoinColor,
                                                 targetCoinColor = finalSol.targetCoin.color,
@@ -1426,9 +1462,25 @@ object AgentCoordinator {
 
                                         val dx = finalSol.dragEnd.x - finalSol.strikerPos.x
                                         val dy = finalSol.dragEnd.y - finalSol.strikerPos.y
-                                        val shootEndX = (shootStartX + dx).toInt().coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
-                                        val shootEndY = (shootStartY + dy).toInt().coerceIn(16, (snapshot.screenHeight - 16).coerceAtLeast(17))
+                                        val minBoundX = 16f
+                                        val maxBoundX = (snapshot.screenWidth - 16f).coerceAtLeast(17f)
+                                        val minBoundY = 16f
+                                        val maxBoundY = (snapshot.screenHeight - maxOf(48f, snapshot.screenHeight * 0.045f)).coerceAtLeast(17f)
+                                        var pullScale = 1f
+                                        if (dx < -1e-3f && shootStartX + dx < minBoundX) {
+                                            pullScale = minOf(pullScale, ((minBoundX - shootStartX) / dx).coerceIn(0.2f, 1f))
+                                        } else if (dx > 1e-3f && shootStartX + dx > maxBoundX) {
+                                            pullScale = minOf(pullScale, ((maxBoundX - shootStartX) / dx).coerceIn(0.2f, 1f))
+                                        }
+                                        if (dy < -1e-3f && shootStartY + dy < minBoundY) {
+                                            pullScale = minOf(pullScale, ((minBoundY - shootStartY) / dy).coerceIn(0.2f, 1f))
+                                        } else if (dy > 1e-3f && shootStartY + dy > maxBoundY) {
+                                            pullScale = minOf(pullScale, ((maxBoundY - shootStartY) / dy).coerceIn(0.2f, 1f))
+                                        }
+                                        val shootEndX = (shootStartX + dx * pullScale).toInt().coerceIn(minBoundX.toInt(), maxBoundX.toInt())
+                                        val shootEndY = (shootStartY + dy * pullScale).toInt().coerceIn(minBoundY.toInt(), maxBoundY.toInt())
                                         val modeTag = if (isFreestyleMode) "Freestyle" else myCarromCoinColor.name
+                                        val shotDurationMs = if (consecutiveUnregisteredCarromShots > 0) 560L else 450L
                                         PlannedAction(
                                             actionType = AgentActionType.DRAG,
                                             targetNodeId = null,
@@ -1436,7 +1488,7 @@ object AgentCoordinator {
                                             y = shootStartY.toInt(),
                                             endX = shootEndX,
                                             endY = shootEndY,
-                                            durationMs = 500L,
+                                            durationMs = shotDurationMs,
                                             textToType = null,
                                             waitSeconds = null,
                                             memoryNote = "Carrom ($modeTag) $telemetry: ${finalSol.reason}",

@@ -194,13 +194,14 @@ class CarromTurnMemory {
 
     fun bestEvaluatedSpotToReturnTo(
         currentStrikerX: Float?,
-        currentInPlaceConfidence: Float
+        currentInPlaceConfidence: Float,
+        minShiftPx: Float = 54f
     ): Float? {
         if (returnedToBestSpot || currentStrikerX == null) return null
         val best = bestEvaluatedThisTurn ?: return null
         if (best.rejectedDueToCollisionOrFoul || best.isBreakShot) return null
         val dist = abs(best.strikerPos.x - currentStrikerX)
-        if (dist <= 54f) return null
+        if (dist <= minShiftPx) return null
         return if (best.confidenceScore > currentInPlaceConfidence + 0.14f) best.strikerPos.x else null
     }
 

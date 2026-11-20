@@ -1393,13 +1393,34 @@ object CarromGeometrySolver {
         val cutCompensation = (1.0 / kotlin.math.cos(cutRad)).toFloat().coerceIn(1.0f, 1.85f)
         val basePower = (totalDistance / boardWidth).coerceIn(0.45f, 1.35f)
         val effectivePower = (basePower * cutCompensation * powerMultiplier).coerceIn(0.45f, 1.75f)
-        val minPull = max(150f, boardWidth * 0.16f)
+        val minPull = max(120f, boardWidth * 0.16f)
         val maxPull = min(400f, boardWidth * 0.44f).coerceAtLeast(minPull + 20f)
         val pullLength = (boardWidth * 0.28f * effectivePower).coerceIn(minPull, maxPull)
-        val rawEnd = strikerPos - shotDir * pullLength
+        val pullVec = Point2D(-shotDir.x * pullLength, -shotDir.y * pullLength)
+
+        val minX = 16f
+        val maxX = max(17f, screenWidth - 16f)
+        val minY = 16f
+        // Keep pull endpoint clear of bottom system navigation/gesture bar on Android 13-15 OEMs
+        val bottomNavClearance = max(48f, screenHeight * 0.045f)
+        val maxY = max(minY + 1f, screenHeight - bottomNavClearance)
+
+        var scale = 1f
+        if (pullVec.x < -1e-3f && strikerPos.x + pullVec.x < minX) {
+            scale = min(scale, ((minX - strikerPos.x) / pullVec.x).coerceIn(0.2f, 1f))
+        } else if (pullVec.x > 1e-3f && strikerPos.x + pullVec.x > maxX) {
+            scale = min(scale, ((maxX - strikerPos.x) / pullVec.x).coerceIn(0.2f, 1f))
+        }
+        if (pullVec.y < -1e-3f && strikerPos.y + pullVec.y < minY) {
+            scale = min(scale, ((minY - strikerPos.y) / pullVec.y).coerceIn(0.2f, 1f))
+        } else if (pullVec.y > 1e-3f && strikerPos.y + pullVec.y > maxY) {
+            scale = min(scale, ((maxY - strikerPos.y) / pullVec.y).coerceIn(0.2f, 1f))
+        }
+
+        val clamped = strikerPos + pullVec * scale
         return Point2D(
-            x = rawEnd.x.coerceIn(16f, max(17f, screenWidth - 16f)),
-            y = rawEnd.y.coerceIn(16f, max(17f, screenHeight - 16f))
+            x = clamped.x.coerceIn(minX, maxX),
+            y = clamped.y.coerceIn(minY, maxY)
         )
     }
 }

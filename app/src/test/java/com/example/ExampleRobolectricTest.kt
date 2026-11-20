@@ -1487,5 +1487,99 @@ class ExampleRobolectricTest {
         org.junit.Assert.assertTrue("Expected Tier-1 Sure Shot", tier1Sol!!.isSureShot)
         org.junit.Assert.assertTrue("Expected isTrainingMatched=true on Tier-1 match", tier1Sol.isTrainingMatched)
     }
+
+    @Test
+    fun `samsung a07 720x1600 striker localization locks onto true shifted baseline Y instead of default 0845f`() {
+        com.example.game.CarromVisionDetector.resetMotionHistory()
+        val width = 360
+        val height = 800
+        val bm = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+        bm.eraseColor(android.graphics.Color.rgb(92, 24, 18))
+
+        fun paintRect(left: Float, top: Float, right: Float, bottom: Float, colorInt: Int) {
+            val l = left.toInt().coerceIn(0, width - 1)
+            val t = top.toInt().coerceIn(0, height - 1)
+            val r = right.toInt().coerceIn(0, width - 1)
+            val b = bottom.toInt().coerceIn(0, height - 1)
+            for (y in t..b) {
+                for (x in l..r) {
+                    bm.setPixel(x, y, colorInt)
+                }
+            }
+        }
+
+        fun paintDisc(cx: Float, cy: Float, r: Float, colorInt: Int) {
+            val rSq = r * r
+            val minX = (cx - r).toInt().coerceIn(0, width - 1)
+            val maxX = (cx + r).toInt().coerceIn(0, width - 1)
+            val minY = (cy - r).toInt().coerceIn(0, height - 1)
+            val maxY = (cy + r).toInt().coerceIn(0, height - 1)
+            for (y in minY..maxY) {
+                for (x in minX..maxX) {
+                    val dx = x - cx
+                    val dy = y - cy
+                    if (dx * dx + dy * dy <= rSq) {
+                        bm.setPixel(x, y, colorInt)
+                    }
+                }
+            }
+        }
+
+        val boardLeft = width * 0.055f
+        val boardWidth = width * 0.89f
+        val boardRight = boardLeft + boardWidth
+        val boardTop = (height - boardWidth) * 0.48f
+        val boardBottom = boardTop + boardWidth
+        // True baseline shifted noticeably higher (0.805f instead of default 0.845f -> ~13bm / ~26 screen px off)
+        val trueBaselineY = boardTop + boardWidth * 0.805f
+
+        paintRect(boardLeft, boardTop, boardRight, boardBottom, android.graphics.Color.rgb(212, 170, 128))
+        // Draw dark horizontal baseline line & end circles that would merge with striker in naive flood-fill
+        paintRect(boardLeft + boardWidth * 0.16f, trueBaselineY - 1f, boardLeft + boardWidth * 0.84f, trueBaselineY + 1f, android.graphics.Color.rgb(65, 42, 30))
+        paintDisc(boardLeft + boardWidth * 0.175f, trueBaselineY, 8f, android.graphics.Color.rgb(214, 122, 26))
+        paintDisc(boardLeft + boardWidth * 0.825f, trueBaselineY, 8f, android.graphics.Color.rgb(214, 122, 26))
+        // Add unrelated cyan decorative spot near right corner at 0.845f to ensure it does not hijack striker
+        paintDisc(boardLeft + boardWidth * 0.88f, boardTop + boardWidth * 0.845f, 5f, android.graphics.Color.rgb(0, 220, 235))
+
+        // Target white coin & Red queen
+        paintDisc(boardLeft + boardWidth * 0.32f, boardTop + boardWidth * 0.34f, 10f, android.graphics.Color.rgb(245, 245, 240))
+        paintDisc(boardLeft + boardWidth * 0.50f, boardTop + boardWidth * 0.50f, 10f, android.graphics.Color.rgb(215, 28, 32))
+
+        // Striker in dark charcoal/wood-trim skin right on trueBaselineY at X=0.52
+        val strikerBmX = boardLeft + boardWidth * 0.52f
+        paintDisc(strikerBmX, trueBaselineY, 12f, android.graphics.Color.rgb(68, 44, 34))
+        paintDisc(strikerBmX, trueBaselineY, 6f, android.graphics.Color.rgb(185, 165, 145))
+
+        // Bottom slider knob directly below strikerBmX
+        val sliderY = boardBottom + height * 0.12f
+        paintRect(boardLeft + boardWidth * 0.16f, sliderY - 7f, boardLeft + boardWidth * 0.84f, sliderY + 7f, android.graphics.Color.rgb(142, 92, 54))
+        paintDisc(strikerBmX, sliderY, 10f, android.graphics.Color.rgb(255, 200, 30))
+
+        val outcome = com.example.game.CarromVisionDetector.analyzeAndSolve(
+            screenshot = bm,
+            screenWidth = 720,
+            screenHeight = 1600,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            consecutiveOfflineWaits = 0
+        )
+
+        org.junit.Assert.assertTrue("Expected SolvedShot on 720x1600 device, got $outcome", outcome is com.example.game.CarromVisionOutcome.SolvedShot)
+        val solved = outcome as com.example.game.CarromVisionOutcome.SolvedShot
+        org.junit.Assert.assertNotNull(solved.detectedStriker)
+        org.junit.Assert.assertNotNull(solved.detectedSliderKnob)
+
+        val expectedScreenX = strikerBmX * 2f
+        val expectedScreenY = trueBaselineY * 2f
+        assertEquals(expectedScreenX, solved.detectedStriker!!.center.x, 10f)
+        // Must lock onto the REAL shifted striker Y (0.805f), NOT default 0.845f (~26px lower)
+        assertEquals(expectedScreenY, solved.detectedStriker!!.center.y, 10f)
+        org.junit.Assert.assertTrue(
+            "Drag end must remain clear of bottom nav bar on 720x1600: ${solved.solution.dragEnd}",
+            solved.solution.dragEnd.y <= 1600f - 72f + 1f
+        )
+
+        bm.recycle()
+        com.example.game.CarromVisionDetector.resetMotionHistory()
+    }
 }
 

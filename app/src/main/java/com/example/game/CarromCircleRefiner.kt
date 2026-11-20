@@ -276,4 +276,130 @@ object CarromCircleRefiner {
 
         return results
     }
+
+    /**
+     * Locates a circular striker disc directly by radial gradient Hough voting inside the
+     * baseline band around [preferredXScreen] (typically the bottom slider knob X).
+     * Requires curved left/right wall votes so straight horizontal baseline tracks cannot fool it,
+     * and finds exact visual Y even when defaultBaselineY (0.845f) or boardTop is shifted.
+     */
+    fun findStrikerByHoughInWindow(
+        bitmap: Bitmap,
+        searchMinScreenX: Float,
+        searchMaxScreenX: Float,
+        searchMinScreenY: Float,
+        searchMaxScreenY: Float,
+        expectedRadiusScreen: Float,
+        scaleX: Float,
+        scaleY: Float,
+        preferredXScreen: Float? = null
+    ): CarromPiece? {
+        if (expectedRadiusScreen < 6f || scaleX <= 0f || scaleY <= 0f) return null
+
+        val rBm = (expectedRadiusScreen / scaleX).coerceIn(5f, 44f)
+        val padBm = (rBm * 1.35f + 3f).roundToInt()
+
+        val innerMinX = (searchMinScreenX / scaleX).roundToInt().coerceIn(padBm + 1, bitmap.width - 3)
+        val innerMaxX = (searchMaxScreenX / scaleX).roundToInt().coerceIn(innerMinX + 2, bitmap.width - padBm - 2)
+        val innerMinY = (searchMinScreenY / scaleY).roundToInt().coerceIn(padBm + 1, bitmap.height - 3)
+        val innerMaxY = (searchMaxScreenY / scaleY).roundToInt().coerceIn(innerMinY + 2, bitmap.height - padBm - 2)
+
+        val minX = (innerMinX - padBm).coerceAtLeast(1)
+        val maxX = (innerMaxX + padBm).coerceAtMost(bitmap.width - 2)
+        val minY = (innerMinY - padBm).coerceAtLeast(1)
+        val maxY = (innerMaxY + padBm).coerceAtMost(bitmap.height - 2)
+
+        val patchW = maxX - minX + 1
+        val patchH = maxY - minY + 1
+        if (patchW < 12 || patchH < 12 || patchW * patchH > 160_000) return null
+
+        val luma = FloatArray(patchW * patchH)
+        for (py in minY..maxY) {
+            val rowOff = (py - minY) * patchW
+            for (px in minX..maxX) {
+                val p = bitmap.getPixel(px, py)
+                luma[rowOff + (px - minX)] =
+                    Color.red(p) * 0.299f + Color.green(p) * 0.587f + Color.blue(p) * 0.114f
+            }
+        }
+
+        val acc = FloatArray(patchW * patchH)
+        val horizAcc = FloatArray(patchW * patchH)
+        val rCandidates = floatArrayOf(rBm * 0.90f, rBm, rBm * 1.12f)
+
+        for (y in 1 until patchH - 1) {
+            val row = y * patchW
+            for (x in 1 until patchW - 1) {
+                val gx = (
+                    -luma[row - patchW + x - 1] + luma[row - patchW + x + 1] -
+                        2f * luma[row + x - 1] + 2f * luma[row + x + 1] -
+                        luma[row + patchW + x - 1] + luma[row + patchW + x + 1]
+                    )
+                val gy = (
+                    -luma[row - patchW + x - 1] - 2f * luma[row - patchW + x] - luma[row - patchW + x + 1] +
+                        luma[row + patchW + x - 1] + 2f * luma[row + patchW + x] + luma[row + patchW + x + 1]
+                    )
+                val mag = hypot(gx, gy)
+                if (mag < 32f) continue
+                val nx = gx / mag
+                val ny = gy / mag
+                val isHorizWall = abs(nx) >= 0.45f
+
+                for (rTest in rCandidates) {
+                    for (sign in intArrayOf(-1, 1)) {
+                        val vx = (x + sign * nx * rTest).roundToInt()
+                        val vy = (y + sign * ny * rTest).roundToInt()
+                        if (vx in 0 until patchW && vy in 0 until patchH) {
+                            val idx = vy * patchW + vx
+                            acc[idx] += mag
+                            if (isHorizWall) {
+                                horizAcc[idx] += mag
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val minTotalVotes = kotlin.math.max(450f, rBm * 45f)
+        val minHorizVotes = kotlin.math.max(120f, rBm * 12f)
+        val prefBmX = preferredXScreen?.let { it / scaleX }
+        val searchSpanBm = (innerMaxX - innerMinX).coerceAtLeast(1).toFloat()
+
+        var bestPx = -1
+        var bestPy = -1
+        var bestScore = 0f
+
+        for (py in (innerMinY - minY)..(innerMaxY - minY)) {
+            for (px in (innerMinX - minX)..(innerMaxX - minX)) {
+                val idx = py * patchW + px
+                val total = acc[idx]
+                if (total < minTotalVotes || horizAcc[idx] < minHorizVotes) continue
+                val worldBmX = (minX + px).toFloat()
+                val xPrior = if (prefBmX != null) {
+                    1f - (abs(worldBmX - prefBmX) / (searchSpanBm * 1.5f)).coerceIn(0f, 0.35f)
+                } else {
+                    1f
+                }
+                val weighted = (total + horizAcc[idx] * 0.4f) * xPrior
+                if (weighted > bestScore) {
+                    bestScore = weighted
+                    bestPx = px
+                    bestPy = py
+                }
+            }
+        }
+
+        if (bestPx < 0 || bestPy < 0) return null
+
+        val coarseCenter = Point2D((minX + bestPx) * scaleX, (minY + bestPy) * scaleY)
+        val refined = refinePieceCenterSubPixel(
+            bitmap = bitmap,
+            coarseCenterScreen = coarseCenter,
+            expectedRadiusScreen = expectedRadiusScreen,
+            scaleX = scaleX,
+            scaleY = scaleY
+        )
+        return CarromPiece(CoinColor.STRIKER, refined, expectedRadiusScreen)
+    }
 }

@@ -246,33 +246,18 @@ object GestureExecutor {
         endY: Float,
         durationMs: Long = 380L
     ): Boolean {
-        if (durationMs >= 480L && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Brief 65ms touch-down hold lets game engines (Unity/Cocos2d-x) lock onto the striker before pulling back
-            val holdPath = Path().apply { moveTo(startX, startY) }
-            val holdStroke = GestureDescription.StrokeDescription(holdPath, 0L, 65L, true)
-            val holdGesture = GestureDescription.Builder().addStroke(holdStroke).build()
-            if (dispatchAndAwait(service, holdGesture)) {
-                val pullPath = Path().apply {
-                    moveTo(startX, startY)
-                    lineTo(endX, endY)
-                }
-                val pullStroke = holdStroke.continueStroke(pullPath, 0L, durationMs, false)
-                val pullGesture = GestureDescription.Builder().addStroke(pullStroke).build()
-                if (dispatchAndAwait(service, pullGesture)) {
-                    return true
-                }
-            }
-            // Some OEM AccessibilityServices (HyperOS/MIUI, ColorOS, OneUI) cancel continueStroke;
-            // immediately fall back to a reliable single continuous stroke so the shot is never dropped.
-            Log.w(TAG, "Two-step continued drag rejected; falling back to single continuous stroke")
-            delay(30L)
-        }
-
+        // Always use a single unbroken StrokeDescription in one IPC dispatch:
+        // two-step continueStroke introduces an IPC gap and is cancelled by some OEM
+        // AccessibilityServices (One UI, HyperOS, ColorOS), dropping Carrom shot drags.
         val path = Path().apply {
             moveTo(startX, startY)
             lineTo(endX, endY)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
+        val stroke = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            GestureDescription.StrokeDescription(path, 0L, durationMs, false)
+        } else {
+            GestureDescription.StrokeDescription(path, 0L, durationMs)
+        }
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchAndAwait(service, gesture)
     }

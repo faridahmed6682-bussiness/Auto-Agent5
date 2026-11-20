@@ -145,7 +145,17 @@ object CarromVisionDetector {
         val defaultBaselineY = boardTop + boardHeightPx * 0.845f
 
         // 4. Color-agnostic bottom baseline striker detection (matches ANY striker color/skin/halo)
-        val contrastStriker = if (rawPieces.none { it.color == CoinColor.STRIKER }) {
+        val rawStrikerAligned = rawPieces
+            .filter { it.color == CoinColor.STRIKER }
+            .minByOrNull { p ->
+                if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
+                else abs(p.center.y - defaultBaselineY)
+            }
+            ?.takeIf { p ->
+                sliderKnobPx == null || abs(p.center.x - sliderKnobPx.x) <= boardWidthPx * 0.18f
+            }
+
+        val contrastStriker = if (rawStrikerAligned == null) {
             detectAnyStrikerOnBaseline(
                 bitmap = screenshot,
                 boardLeft = boardBmLeft,
@@ -155,13 +165,15 @@ object CarromVisionDetector {
                 scaleX = scaleX,
                 scaleY = scaleY,
                 strikerRadiusPx = strikerRadius,
-                sliderKnobPx = sliderKnobPx
+                sliderKnobPx = sliderKnobPx,
+                scanTopFraction = 0.72f,
+                scanBottomFraction = 0.93f
             )
         } else {
             null
         }
 
-        val prelimStrikerRaw = contrastStriker ?: rawPieces.firstOrNull { it.color == CoinColor.STRIKER }
+        val prelimStrikerRaw = contrastStriker ?: rawStrikerAligned
         val prelimStriker = if (prelimStrikerRaw != null && useSubPixelRefinement) {
             val refinedCenter = CarromCircleRefiner.refinePieceCenterSubPixel(
                 bitmap = screenshot,
@@ -180,7 +192,8 @@ object CarromVisionDetector {
                 p.color != CoinColor.STRIKER && (p.center - prelimStriker.center).length() > clearR
             } + prelimStriker
         } else {
-            rawPieces
+            // Drop unaligned bogus baseline-band STRIKER noise when sliderKnobPx disagrees
+            if (sliderKnobPx != null) rawPieces.filter { it.color != CoinColor.STRIKER } else rawPieces
         }
 
         val promoted = promoteOrAnchorStriker(
@@ -395,7 +408,16 @@ object CarromVisionDetector {
         )
 
         val defaultBaselineY = boardTop + boardHeightPx * 0.845f
-        val contrastStriker = if (rawPieces.none { it.color == CoinColor.STRIKER }) {
+        val rawStrikerAligned = rawPieces
+            .filter { it.color == CoinColor.STRIKER }
+            .minByOrNull { p ->
+                if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
+                else abs(p.center.y - defaultBaselineY)
+            }
+            ?.takeIf { p ->
+                sliderKnobPx == null || abs(p.center.x - sliderKnobPx.x) <= boardWidthPx * 0.18f
+            }
+        val contrastStriker = if (rawStrikerAligned == null) {
             detectAnyStrikerOnBaseline(
                 bitmap = screenshot,
                 boardLeft = boardBmLeft,
@@ -405,19 +427,21 @@ object CarromVisionDetector {
                 scaleX = scaleX,
                 scaleY = scaleY,
                 strikerRadiusPx = strikerRadius,
-                sliderKnobPx = sliderKnobPx
+                sliderKnobPx = sliderKnobPx,
+                scanTopFraction = 0.72f,
+                scanBottomFraction = 0.93f
             )
         } else {
             null
         }
-        val prelimStriker = contrastStriker ?: rawPieces.firstOrNull { it.color == CoinColor.STRIKER }
+        val prelimStriker = contrastStriker ?: rawStrikerAligned
         val cleanedPieces = if (prelimStriker != null) {
             val clearR = strikerRadius * 1.40f
             rawPieces.filter { p ->
                 p.color != CoinColor.STRIKER && (p.center - prelimStriker.center).length() > clearR
             } + prelimStriker
         } else {
-            rawPieces
+            if (sliderKnobPx != null) rawPieces.filter { it.color != CoinColor.STRIKER } else rawPieces
         }
         val promoted = promoteOrAnchorStriker(
             pieces = cleanedPieces,
@@ -1093,14 +1117,27 @@ object CarromVisionDetector {
         val rows = ((scanBottom - scanTop) / SAMPLE_STEP).coerceAtLeast(1)
         if (cols < 4 || rows < 3) return null
 
-        val nonWood = Array(rows) { BooleanArray(cols) }
+        val rawNonWood = Array(rows) { BooleanArray(cols) }
         for (r in 0 until rows) {
             val py = (scanTop + r * SAMPLE_STEP).coerceIn(0, bitmap.height - 1)
             for (c in 0 until cols) {
                 val px = (scanLeft + c * SAMPLE_STEP).coerceIn(0, bitmap.width - 1)
                 val p = bitmap.getPixel(px, py)
                 val diff = abs(Color.red(p) - woodR) + abs(Color.green(p) - woodG) + abs(Color.blue(p) - woodB)
-                nonWood[r][c] = diff >= 56
+                rawNonWood[r][c] = diff >= 56
+            }
+        }
+
+        // Remove 1-sample-tall horizontal baseline tracks so flood-fill does not glue
+        // the striker disc onto the baseline rails or red/orange end-circles.
+        val nonWood = Array(rows) { BooleanArray(cols) }
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                if (!rawNonWood[r][c]) continue
+                val hasVertNeighbor =
+                    (r > 0 && (rawNonWood[r - 1][c] || (c > 0 && rawNonWood[r - 1][c - 1]) || (c + 1 < cols && rawNonWood[r - 1][c + 1]))) ||
+                        (r + 1 < rows && (rawNonWood[r + 1][c] || (c > 0 && rawNonWood[r + 1][c - 1]) || (c + 1 < cols && rawNonWood[r + 1][c + 1])))
+                nonWood[r][c] = hasVertNeighbor
             }
         }
 
@@ -1155,12 +1192,13 @@ object CarromVisionDetector {
                 val cx = sumX / count
                 val cy = sumY / count
                 val inSafeMidZone = cx in innerSafeLeftPx..innerSafeRightPx
-                val nearSlider = sliderKnobPx != null && abs(cx - sliderKnobPx.x) <= boardWidthPx * 0.14f
+                val nearSlider = sliderKnobPx != null && abs(cx - sliderKnobPx.x) <= boardWidthPx * 0.16f
                 val approxUnclampedR = kotlin.math.sqrt(count.toFloat() / 3.14f) * SAMPLE_STEP * scaleX
                 if (!inSafeMidZone && !nearSlider && approxUnclampedR < strikerRadiusPx * 0.92f) {
                     // Ignore small stationary orange baseline end-circles at any screen DPI when no slider knob is near
                     continue
                 }
+                if (sliderKnobPx != null && !nearSlider) continue
 
                 val score = count.toFloat() + (if (nearSlider) 120f else 0f) + (if (inSafeMidZone) 40f else 0f)
                 if (score > bestScore) {
@@ -1170,7 +1208,26 @@ object CarromVisionDetector {
                 }
             }
         }
-        return bestPiece
+        if (bestPiece != null) return bestPiece
+
+        // Radial gradient Hough fallback: pinpoints exact visual striker (x,y) around sliderKnobPx.x
+        // even when dark/wood-toned/patterned striker skins fail color-diff thresholding or baseline lines touch it.
+        if (sliderKnobPx != null) {
+            val houghMinX = (sliderKnobPx.x - boardWidthPx * 0.18f).coerceAtLeast(boardLeft * scaleX + strikerRadiusPx)
+            val houghMaxX = (sliderKnobPx.x + boardWidthPx * 0.18f).coerceAtMost(boardRight * scaleX - strikerRadiusPx)
+            return CarromCircleRefiner.findStrikerByHoughInWindow(
+                bitmap = bitmap,
+                searchMinScreenX = houghMinX,
+                searchMaxScreenX = houghMaxX,
+                searchMinScreenY = scanTop * scaleY,
+                searchMaxScreenY = scanBottom * scaleY,
+                expectedRadiusScreen = strikerRadiusPx,
+                scaleX = scaleX,
+                scaleY = scaleY,
+                preferredXScreen = sliderKnobPx.x
+            )
+        }
+        return null
     }
 
     private fun estimateBoardWoodRgb(

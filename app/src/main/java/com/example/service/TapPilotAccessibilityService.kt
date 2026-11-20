@@ -20,12 +20,14 @@ import com.example.agent.PlannedAction
 import com.example.agent.UiSnapshot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class TapPilotAccessibilityService : AccessibilityService() {
 
@@ -141,7 +143,13 @@ class TapPilotAccessibilityService : AccessibilityService() {
         action: PlannedAction,
         snapshot: UiSnapshot
     ): GestureExecutor.ExecutionResult {
-        overlayController?.setTouchPassthrough(true)
+        withContext(Dispatchers.Main.immediate) {
+            overlayController?.setTouchPassthrough(true)
+        }
+        if (action.actionType == com.example.agent.AgentActionType.DRAG) {
+            // Yield 16ms so WindowManager applies FLAG_NOT_TOUCHABLE before InputDispatcher injects the drag.
+            delay(16L)
+        }
         return try {
             GestureExecutor.execute(
                 service = this,
@@ -151,7 +159,9 @@ class TapPilotAccessibilityService : AccessibilityService() {
                 screenHeight = snapshot.screenHeight
             )
         } finally {
-            overlayController?.setTouchPassthrough(false)
+            withContext(NonCancellable + Dispatchers.Main.immediate) {
+                overlayController?.setTouchPassthrough(false)
+            }
         }
     }
 
