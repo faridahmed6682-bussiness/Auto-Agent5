@@ -480,22 +480,34 @@ object CarromContextHelper {
     }
 
     fun isLikelyGameLobbyMenu(nodes: List<ScreenNode>): Boolean {
-        val lobbyLabels = setOf(
-            "play", "play classic", "disc pool", "freestyle",
-            "shop", "store", "tournament", "matchmaking", "find match",
-            "claim", "collect", "login", "sign in", "continue", "খেলুন", "খেলা শুরু"
+        val strongLobbyExact = setOf(
+            "play classic", "disc pool", "freestyle",
+            "tournament", "matchmaking", "find match",
+            "play with friends", "vs computer", "খেলুন", "খেলা শুরু"
         )
-        return nodes.any { node ->
-            if (!node.isClickable) return@any false
+        val weakLobbyExact = setOf(
+            "play", "classic", "shop", "store",
+            "claim", "collect", "login", "sign in", "continue"
+        )
+        var strongHit = false
+        var weakSignalCount = 0
+        for (node in nodes) {
+            if (!node.isClickable) continue
             val label = node.displayLabel().trim().lowercase()
-            label.isNotBlank() && (
-                label in lobbyLabels ||
-                    label.startsWith("play ") ||
-                    label.contains("classic") ||
-                    label.contains("disc pool") ||
-                    label.contains("freestyle")
-                )
+            if (label.isBlank()) continue
+            if (label in strongLobbyExact || label.startsWith("play classic") || label.startsWith("find match")) {
+                strongHit = true
+                break
+            }
+            if (label in weakLobbyExact ||
+                label.startsWith("play ") ||
+                label.contains("disc pool") ||
+                label.contains("freestyle")
+            ) {
+                weakSignalCount++
+            }
         }
+        return strongHit || weakSignalCount >= 2
     }
 
     fun buildDefaultCarromPlaybook(ruleMode: CarromRuleMode = CarromRuleMode.FREESTYLE): TaskPlaybook {

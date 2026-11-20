@@ -183,7 +183,8 @@ fun DashboardScreen(viewModel: AgentViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val serviceActive = isConnected || isEnabledInSettings
+    val isServiceDisconnectedByOs = isEnabledInSettings && !isConnected
+    val serviceActive = isConnected
     val (trace, workingMemory) = when (val s = agentState) {
         is AgentUiState.Idle -> emptyList<AgentStepLog>() to ""
         is AgentUiState.Running -> s.trace to s.workingMemory
@@ -292,6 +293,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 item {
                     TelemetryHeader(
                         isServiceActive = serviceActive,
+                        isServiceDisconnectedByOs = isServiceDisconnectedByOs,
                         isRunning = agentState is AgentUiState.Running,
                         onOpenSettings = { showSettingsSheet = true }
                     )
@@ -300,6 +302,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 if (!serviceActive) {
                     item {
                         AccessibilityOnboardingCard(
+                            isServiceDisconnectedByOs = isServiceDisconnectedByOs,
                             onOpenAccessibilitySettings = {
                                 context.startActivity(viewModel.buildOpenAccessibilitySettingsIntent())
                             },

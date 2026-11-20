@@ -136,6 +136,7 @@ import kotlin.math.roundToInt
 @Composable
 fun TelemetryHeader(
     isServiceActive: Boolean,
+    isServiceDisconnectedByOs: Boolean = false,
     isRunning: Boolean,
     onOpenSettings: () -> Unit
 ) {
@@ -171,10 +172,10 @@ fun TelemetryHeader(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (isServiceActive) {
-                        stringResource(R.string.status_service_active)
-                    } else {
-                        stringResource(R.string.status_service_inactive)
+                    text = when {
+                        isServiceActive -> stringResource(R.string.status_service_active)
+                        isServiceDisconnectedByOs -> stringResource(R.string.status_service_disconnected)
+                        else -> stringResource(R.string.status_service_inactive)
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = statusColor
@@ -213,6 +214,7 @@ fun TelemetryHeader(
 
 @Composable
 fun AccessibilityOnboardingCard(
+    isServiceDisconnectedByOs: Boolean = false,
     onOpenAccessibilitySettings: () -> Unit,
     onRefreshStatus: () -> Unit
 ) {
@@ -232,14 +234,22 @@ fun AccessibilityOnboardingCard(
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = stringResource(R.string.onboarding_title),
+                    text = if (isServiceDisconnectedByOs) {
+                        stringResource(R.string.onboarding_disconnected_title)
+                    } else {
+                        stringResource(R.string.onboarding_title)
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     color = AmberWarning
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = stringResource(R.string.onboarding_body),
+                text = if (isServiceDisconnectedByOs) {
+                    stringResource(R.string.onboarding_disconnected_body)
+                } else {
+                    stringResource(R.string.onboarding_body)
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )

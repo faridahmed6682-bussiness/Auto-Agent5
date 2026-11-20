@@ -450,6 +450,7 @@ object AgentCoordinator {
                 val carromWatchTrainer = CarromWatchTrainer()
                 var lastWatchUiUpdateMs = 0L
                 var lastWatchHudDetail = ""
+                var lastStepWasCarromContext = isCarromTaskGoal
                 if (isCarromWatchTrainMode) {
                     appendTrace(
                         trace,
@@ -617,7 +618,13 @@ object AgentCoordinator {
                         trace = trace.toList()
                     )
 
-                    val snapshot = service.captureSnapshot(currentSettings.useVisionScreenshot || isCarromWatchTrainMode)
+                    val shouldCaptureForCarrom = currentSettings.carromPrecisionSolver &&
+                        (isCarromTaskGoal || lastStepWasCarromContext)
+                    val snapshot = service.captureSnapshot(
+                        currentSettings.useVisionScreenshot ||
+                            isCarromWatchTrainMode ||
+                            shouldCaptureForCarrom
+                    )
 
                     val currentSig = ActionCacheStore.computeScreenSignature(snapshot.nodes)
                     val currentCompositeScreen = "${snapshot.packageName}::$currentSig"
@@ -626,6 +633,7 @@ object AgentCoordinator {
                         packageName = snapshot.packageName,
                         playbookTopicKey = activePlaybook?.topicKey
                     )
+                    lastStepWasCarromContext = isCarromContext
                     val selfPkg = appContext?.packageName ?: "com.example"
                     val isOnLauncher = LauncherSearchHelper.isLauncherOrSearchScreen(snapshot.packageName, snapshot.nodes)
                     val isWrongNotifApp = currentActiveTarget != null &&
@@ -1079,7 +1087,7 @@ object AgentCoordinator {
                         val localCarromAction: PlannedAction? = if (
                             currentSettings.carromPrecisionSolver &&
                             isActiveCarromMatchScreen &&
-                            interactiveNodeCount < 18 &&
+                            interactiveNodeCount < 50 &&
                             snapshot.screenshot != null
                         ) {
                             val nowCarromMs = System.currentTimeMillis()
@@ -1518,9 +1526,9 @@ object AgentCoordinator {
                                     if (canRecoverInCarromZeroApi && (!isNonGameApp || mode == AgentExecutionMode.CONTINUOUS_MONITOR || step <= 3)) {
                                         val waitReason = when {
                                             !hasKeys && isNonGameApp ->
-                                                "Zero-API Carrom ready — open Carrom match board on screen..."
+                                                "Zero-API Carrom ready (pkg=${snapshot.packageName}) — open Carrom match board on screen..."
                                             !hasKeys ->
-                                                "Waiting for Carrom match board (Zero-API local solver)..."
+                                                "Waiting for Carrom match board (lobby=$isLikelyCarromLobby, nodes=$interactiveNodeCount, screen=${snapshot.screenshot != null}, pkg=${snapshot.packageName})"
                                             else ->
                                                 "Waiting for board settle / AI hiccup: $msg"
                                         }

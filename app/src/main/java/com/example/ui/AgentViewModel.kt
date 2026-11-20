@@ -63,6 +63,11 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     val quickPresets: List<GoalPreset> = listOf(
         GoalPreset(
+            title = "Carrom Auto-Play",
+            prompt = com.example.game.CarromCoachHelper.CARROM_AUTO_PLAY_GOAL,
+            suggestedMode = AgentExecutionMode.CONTINUOUS_MONITOR
+        ),
+        GoalPreset(
             title = "Carrom Self-Train",
             prompt = "Open Carrom game, research board rules and foul conditions first, position the striker with DRAG, aim opposite the pocket to pot my coins cleanly, evaluate each shot outcome, and save winning angles & foul mistakes in my playbook.",
             suggestedMode = AgentExecutionMode.CONTINUOUS_MONITOR
@@ -130,7 +135,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         refreshAccessibilityStatus()
         val trainGoal = com.example.game.CarromCoachHelper.CARROM_WATCH_TRAIN_GOAL
         _executionMode.value = AgentExecutionMode.CONTINUOUS_MONITOR
-        _goalText.value = trainGoal
+        // Keep the main goal input ready for autonomous play so tapping Launch after training doesn't stay stuck in 0-touch Watch mode
+        if (_goalText.value.isBlank() || com.example.game.CarromCoachHelper.isCarromWatchTrainGoal(_goalText.value)) {
+            _goalText.value = com.example.game.CarromCoachHelper.CARROM_AUTO_PLAY_GOAL
+        }
         AgentCoordinator.startTask(trainGoal, AgentExecutionMode.CONTINUOUS_MONITOR)
     }
 

@@ -4,9 +4,12 @@
     <string name="accessibility_service_description">Allows TapPilot Agent to read on-screen UI elements, receive notification triggers, capture screen context for AI reasoning, and perform automated tap, scroll, and text-entry gestures on your behalf. A floating control pill with an instant Stop button remains visible during automation.</string>
     <string name="hero_subtitle">Native Kotlin Accessibility + Multi-Provider AI Agent</string>
     <string name="status_service_active">Accessibility Active</string>
+    <string name="status_service_disconnected">Accessibility Paused by OS</string>
     <string name="status_service_inactive">Setup Required</string>
     <string name="onboarding_title">Enable Accessibility Control</string>
     <string name="onboarding_body">TapPilot uses Android AccessibilityService to read screen nodes, dispatch real tap gestures, and render a safe floating Stop overlay without extra display-over-apps permissions.</string>
+    <string name="onboarding_disconnected_title">Accessibility Disconnected in Background</string>
+    <string name="onboarding_disconnected_body">Android Settings shows TapPilot enabled, but the OS stopped the live service binding (common on Xiaomi/Oppo/Vivo/Samsung battery saver or Game Turbo). Toggle TapPilot Accessibility OFF and ON again, and disable Battery Restriction / Game Turbo gesture blocking.</string>
     <string name="action_enable_accessibility">Open Accessibility Settings</string>
     <string name="action_refresh_status">Refresh Status</string>
     <string name="command_section_title">Automation Goal</string>

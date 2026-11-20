@@ -10,10 +10,46 @@ object CarromCoachHelper {
     const val CARROM_WATCH_TRAIN_GOAL =
         "Carrom Watch & Learn Training: watch me play live Carrom matches passively with zero touches, learn winning pocket cut angles, striker baseline positions, board friction and power feel from my shots, and save everything into Carrom Memory and Playbook."
 
+    const val CARROM_AUTO_PLAY_GOAL =
+        "Carrom Auto-Play: open Carrom game, fuse my Watch & Learn Training data with the 2D Physics Solver & Turn Memory, adjust the slider cleanly, and take zero-foul Sure Shots automatically."
+
     fun isCarromWatchTrainGoal(goal: String): Boolean {
         val trimmed = goal.trim()
         if (trimmed == CARROM_WATCH_TRAIN_GOAL) return true
+        if (trimmed == CARROM_AUTO_PLAY_GOAL) return false
         if (!CarromContextHelper.isCarromGoalOrApp(trimmed, "", null)) return false
+
+        // Explicit post-training or autonomous-play requests must never be trapped in passive Watch & Learn mode
+        val saysDoneTrainingAndPlay = trimmed.contains("দিয়েছি") ||
+            trimmed.contains("দিয়েছে") ||
+            trimmed.contains("দিলাম") ||
+            trimmed.contains("দেওয়া") ||
+            trimmed.contains("দেওয়ার") ||
+            trimmed.contains("দেওয়ার") ||
+            trimmed.contains("খেলেছি") ||
+            trimmed.contains("নিয়েছি") ||
+            trimmed.contains("নিলাম") ||
+            trimmed.contains("করেছি") ||
+            trimmed.contains("শেষ") ||
+            trimmed.contains("এবার খেল") ||
+            trimmed.contains("এখন খেল") ||
+            trimmed.contains("নিজে খেল") ||
+            trimmed.contains("নিজে থেকে") ||
+            trimmed.contains("নিজে শট") ||
+            trimmed.contains("শট নে") ||
+            trimmed.contains("শট মার") ||
+            trimmed.contains("আসল ম্যাচ") ||
+            trimmed.contains("auto-play", ignoreCase = true) ||
+            trimmed.contains("autoplay", ignoreCase = true) ||
+            trimmed.contains("auto play", ignoreCase = true) ||
+            trimmed.contains("use training", ignoreCase = true) ||
+            trimmed.contains("after training", ignoreCase = true) ||
+            trimmed.contains("real match", ignoreCase = true) ||
+            trimmed.contains("play yourself", ignoreCase = true) ||
+            trimmed.contains("take shots", ignoreCase = true) ||
+            trimmed.contains("shoot automatically", ignoreCase = true) ||
+            trimmed.contains("play autonomously", ignoreCase = true)
+        if (saysDoneTrainingAndPlay) return false
 
         val explicitEnglishWatch = trimmed.contains("watch & learn", ignoreCase = true) ||
             trimmed.contains("watch me play", ignoreCase = true) ||
@@ -31,19 +67,6 @@ object CarromCoachHelper {
             trimmed.contains("দেখে শেখ") ||
             trimmed.contains("দেখে নাও")
         if (explicitBanglaWatch) return true
-
-        // "ট্রেনিং" triggers Watch & Learn only when asking the agent to take/start training (NOT "ট্রেনিং দিয়েছি এবার খেলো")
-        val saysDoneTrainingAndPlay = trimmed.contains("দিয়েছি") ||
-            trimmed.contains("দিয়েছে") ||
-            trimmed.contains("দিলাম") ||
-            trimmed.contains("দেওয়া") ||
-            trimmed.contains("দেওয়ার") ||
-            trimmed.contains("দেওয়ার") ||
-            trimmed.contains("শেষ") ||
-            trimmed.contains("এবার খেল") ||
-            trimmed.contains("এখন খেল") ||
-            trimmed.contains("নিজে খেল")
-        if (saysDoneTrainingAndPlay) return false
 
         val asksToTakeTraining = trimmed.contains("ট্রেনিং") &&
             (trimmed.contains("নাও") || trimmed.contains("নেও") || trimmed.contains("দাও") || trimmed.contains("শুরু কর"))

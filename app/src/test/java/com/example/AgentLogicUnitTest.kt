@@ -3008,6 +3008,55 @@ class AgentLogicUnitTest {
         assertTrue(missEval.updatedMemory.matchCalibration.frictionScale < 1.0f)
         assertTrue(missEval.updatedMemory.matchCalibration.shotPowerGain < 1.0f)
     }
+
+    @Test
+    fun `carrom post-training auto-play goal and single HUD badges do not block autonomous shooting`() {
+        assertFalse(
+            com.example.game.CarromCoachHelper.isCarromWatchTrainGoal(
+                com.example.game.CarromCoachHelper.CARROM_AUTO_PLAY_GOAL
+            )
+        )
+        assertFalse(
+            com.example.game.CarromCoachHelper.isCarromWatchTrainGoal(
+                "২-৩ ম্যাচ ট্রেনিং নিলাম এবার আসল ম্যাচ খেলো"
+            )
+        )
+        assertFalse(
+            com.example.game.CarromCoachHelper.isCarromWatchTrainGoal(
+                "watch & learn শেষ এখন ক্যারাম শট নেও"
+            )
+        )
+
+        fun clickableBadge(id: Int, label: String) = ScreenNode(
+            id = id,
+            className = "android.widget.Button",
+            text = label,
+            contentDesc = "",
+            viewId = "hud_$id",
+            bounds = ScreenBounds(10, 10, 120, 80),
+            isClickable = true,
+            isEditable = false,
+            isScrollable = false,
+            isChecked = false,
+            isFocused = false
+        )
+
+        // Single generic HUD button during active match must NOT mark board as lobby
+        assertFalse(com.example.agent.CarromContextHelper.isLikelyGameLobbyMenu(listOf(clickableBadge(1, "Shop"))))
+        assertFalse(com.example.agent.CarromContextHelper.isLikelyGameLobbyMenu(listOf(clickableBadge(2, "Continue"))))
+
+        // Multi-button lobby or explicit Play Classic menu still returns true
+        assertTrue(
+            com.example.agent.CarromContextHelper.isLikelyGameLobbyMenu(
+                listOf(clickableBadge(1, "Shop"), clickableBadge(2, "Play"))
+            )
+        )
+        assertTrue(
+            com.example.agent.CarromContextHelper.isLikelyGameLobbyMenu(
+                listOf(clickableBadge(3, "Play Classic"))
+            )
+        )
+    }
 }
 
 
