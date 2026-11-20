@@ -19,6 +19,7 @@ import com.example.game.CarromVisionOutcome
 import com.example.game.CarromWatchTrainer
 import com.example.game.CoinColor
 import com.example.game.PendingCarromShotRecord
+import com.example.game.Point2D
 import com.example.game.TurnProbeStage
 import com.example.service.AgentKeepAliveService
 import com.example.service.LiveMediaProjectionCapturer
@@ -806,6 +807,24 @@ object AgentCoordinator {
                         if (shouldPublishUi) {
                             lastWatchUiUpdateMs = nowWatchMs
                             lastWatchHudDetail = watchUpdate.hudStatusText
+                            val watchPieces = watchObs?.pieces.orEmpty().filter { it.color != CoinColor.STRIKER }
+                            val watchW = watchPieces.count { it.color == CoinColor.WHITE }
+                            val watchB = watchPieces.count { it.color == CoinColor.BLACK }
+                            val watchQ = watchPieces.any { it.color == CoinColor.QUEEN }
+                            val watchVisual = watchObs?.let { obs ->
+                                com.example.game.CarromAimVisualData(
+                                    boardLeft = obs.board.left,
+                                    boardTop = obs.board.top,
+                                    boardRight = obs.board.right,
+                                    boardBottom = obs.board.bottom,
+                                    strikerCenter = obs.striker?.center ?: obs.topStriker?.center,
+                                    tracedCoins = watchPieces,
+                                    targetCoin = null,
+                                    ghostBall = null,
+                                    targetPocket = null,
+                                    dragEnd = null
+                                )
+                            }
                             _carromTurnHud.value = CarromTurnHudState(
                                 isActive = true,
                                 elapsedSec = 0f,
@@ -815,7 +834,13 @@ object AgentCoordinator {
                                 scanCount = carromWatchTrainer.potsObserved,
                                 rejectedCount = carromWatchTrainer.foulsObserved,
                                 stage = TurnProbeStage.WATCH_TRAINING,
-                                detail = watchUpdate.hudStatusText.take(64)
+                                detail = watchUpdate.hudStatusText.take(64),
+                                whiteCount = watchW,
+                                blackCount = watchB,
+                                queenVisible = watchQ,
+                                strikerLocked = watchObs?.striker != null || watchObs?.topStriker != null,
+                                aimSummary = "Traced W$watchW B$watchB${if (watchQ) " Q1" else ""}",
+                                aimVisual = watchVisual
                             )
                             _uiState.value = AgentUiState.Running(
                                 goal = goal,
@@ -1147,10 +1172,10 @@ object AgentCoordinator {
                                                 kotlin.math.hypot(cur.center.x - pre.center.x, cur.center.y - pre.center.y) <= outcome.board.coinRadiusPx * 0.55f
                                         }
                                     }
-                                if (strikerStayedPut && coinsUnmoved && consecutiveUnregisteredCarromShots < 2) {
+                                if (strikerStayedPut && coinsUnmoved && consecutiveUnregisteredCarromShots < 3) {
                                     pendingCarromShot = null
                                     consecutiveUnregisteredCarromShots++
-                                    lastOutcomeHint = "[Carrom shot drag left board static (attempt #$consecutiveUnregisteredCarromShots) — recalibrating striker grab Y/duration] $lastOutcomeHint"
+                                    lastOutcomeHint = "[Carrom shot drag left board static (attempt #$consecutiveUnregisteredCarromShots/3) — recalibrating striker grab Y/duration] $lastOutcomeHint"
                                 } else {
                                     consecutiveUnregisteredCarromShots = 0
                                     lastShotAttemptStrikerX = null
@@ -1370,10 +1395,17 @@ object AgentCoordinator {
                                             correctionAttempts = if (needsClosedLoopCorrection) (verifyState?.correctionAttempts ?: 0) + 1 else 1
                                         )
                                         val remSec = carromTurnMemory.remainingMs(nowCarromMs) / 1000f
+                                        val previewSol = inPlaceSol ?: outcome.solution
+                                        val previewAim = "${previewSol.targetCoin.color.name} -> ${CarromMemoryData.pocketName(previewSol.pocketIndex)} (${previewSol.cutAngleDeg.toInt()}°)"
                                         _carromTurnHud.value = carromTurnMemory.buildHudState(
                                             nowMs = nowCarromMs,
                                             stage = TurnProbeStage.PROBING_SLIDER,
-                                            detail = "Probe ${carromTurnMemory.sliderMovesThisTurn}/${carromTurnMemory.totalPlannedProbes.coerceAtLeast(1)} (${carromTurnMemory.rejectedProbeCount} rej)"
+                                            detail = "Probe ${carromTurnMemory.sliderMovesThisTurn}/${carromTurnMemory.totalPlannedProbes.coerceAtLeast(1)} (${carromTurnMemory.rejectedProbeCount} rej)",
+                                            board = outcome.board,
+                                            tracedPieces = fusedPiecesWithStriker,
+                                            strikerPos = striker.center,
+                                            solution = previewSol,
+                                            aimSummary = previewAim
                                         )
                                         PlannedAction(
                                             actionType = AgentActionType.DRAG,
@@ -1418,23 +1450,15 @@ object AgentCoordinator {
                                             finalSol.isSureShot -> TurnProbeStage.LOCKED_SURE_SHOT
                                             else -> TurnProbeStage.FALLBACK_FIRE
                                         }
-                                        _carromTurnHud.value = carromTurnMemory.buildHudState(
-                                            nowMs = nowCarromMs,
-                                            stage = hudStage,
-                                            detail = finalSol.reason.take(64)
-                                        )
-
-                                        val telemetry = carromTurnMemory.formatTurnTelemetry(nowCarromMs, finalSol)
-                                        carromTurnMemory.resetTurn()
 
                                         val retryYOffset = when (consecutiveUnregisteredCarromShots) {
-                                            1 -> -outcome.board.strikerRadiusPx * 0.42f
-                                            2 -> outcome.board.strikerRadiusPx * 0.42f
+                                            1 -> -outcome.board.strikerRadiusPx * 0.40f
+                                            2 -> outcome.board.strikerRadiusPx * 0.40f
                                             else -> 0f
                                         }
                                         val shootStartX = striker?.center?.x ?: finalSol.strikerPos.x
                                         val shootStartY = ((striker?.center?.y ?: finalSol.strikerPos.y) + retryYOffset)
-                                            .coerceIn(outcome.board.top + outcome.board.height * 0.70f, outcome.board.bottom - outcome.board.strikerRadiusPx)
+                                            .coerceIn(outcome.board.top + outcome.board.height * 0.68f, outcome.board.bottom - outcome.board.strikerRadiusPx)
                                         val strikerNormX = ((shootStartX - outcome.board.left) / outcome.board.width).coerceIn(0f, 1f)
                                         val (coinRowZone, coinColZone) = CarromMemoryData.coinZoneFor(finalSol.targetCoin.center, outcome.board)
 
@@ -1462,25 +1486,51 @@ object AgentCoordinator {
 
                                         val dx = finalSol.dragEnd.x - finalSol.strikerPos.x
                                         val dy = finalSol.dragEnd.y - finalSol.strikerPos.y
-                                        val minBoundX = 16f
-                                        val maxBoundX = (snapshot.screenWidth - 16f).coerceAtLeast(17f)
-                                        val minBoundY = 16f
-                                        val maxBoundY = (snapshot.screenHeight - maxOf(48f, snapshot.screenHeight * 0.045f)).coerceAtLeast(17f)
-                                        var pullScale = 1f
-                                        if (dx < -1e-3f && shootStartX + dx < minBoundX) {
+                                        val minBoundX = 28f
+                                        val maxBoundX = (snapshot.screenWidth - 28f).coerceAtLeast(29f)
+                                        val minBoundY = 24f
+                                        val maxBoundY = (snapshot.screenHeight - maxOf(56f, snapshot.screenHeight * 0.05f)).coerceAtLeast(25f)
+                                        var pullScale = if (consecutiveUnregisteredCarromShots >= 3) 0.84f else 1f
+                                        if (dx < -1e-3f && shootStartX + dx * pullScale < minBoundX) {
                                             pullScale = minOf(pullScale, ((minBoundX - shootStartX) / dx).coerceIn(0.2f, 1f))
-                                        } else if (dx > 1e-3f && shootStartX + dx > maxBoundX) {
+                                        } else if (dx > 1e-3f && shootStartX + dx * pullScale > maxBoundX) {
                                             pullScale = minOf(pullScale, ((maxBoundX - shootStartX) / dx).coerceIn(0.2f, 1f))
                                         }
-                                        if (dy < -1e-3f && shootStartY + dy < minBoundY) {
+                                        if (dy < -1e-3f && shootStartY + dy * pullScale < minBoundY) {
                                             pullScale = minOf(pullScale, ((minBoundY - shootStartY) / dy).coerceIn(0.2f, 1f))
-                                        } else if (dy > 1e-3f && shootStartY + dy > maxBoundY) {
+                                        } else if (dy > 1e-3f && shootStartY + dy * pullScale > maxBoundY) {
                                             pullScale = minOf(pullScale, ((maxBoundY - shootStartY) / dy).coerceIn(0.2f, 1f))
                                         }
                                         val shootEndX = (shootStartX + dx * pullScale).toInt().coerceIn(minBoundX.toInt(), maxBoundX.toInt())
                                         val shootEndY = (shootStartY + dy * pullScale).toInt().coerceIn(minBoundY.toInt(), maxBoundY.toInt())
+
+                                        val finalAimSummary = "${finalSol.targetCoin.color.name} -> ${CarromMemoryData.pocketName(finalSol.pocketIndex)} (${finalSol.cutAngleDeg.toInt()}°) • ${finalSol.powerStyle.label}"
+                                        _carromTurnHud.value = carromTurnMemory.buildHudState(
+                                            nowMs = nowCarromMs,
+                                            stage = hudStage,
+                                            detail = finalSol.reason.take(64),
+                                            board = outcome.board,
+                                            tracedPieces = fusedPiecesWithStriker,
+                                            strikerPos = Point2D(shootStartX, shootStartY),
+                                            solution = finalSol,
+                                            dragEndOverride = Point2D(shootEndX.toFloat(), shootEndY.toFloat()),
+                                            aimSummary = finalAimSummary
+                                        )
+
+                                        val telemetry = carromTurnMemory.formatTurnTelemetry(nowCarromMs, finalSol)
+                                        carromTurnMemory.resetTurn()
+
                                         val modeTag = if (isFreestyleMode) "Freestyle" else myCarromCoinColor.name
-                                        val shotDurationMs = if (consecutiveUnregisteredCarromShots > 0) 560L else 450L
+                                        val pullDistPx = kotlin.math.hypot(
+                                            (shootEndX - shootStartX).toDouble(),
+                                            (shootEndY - shootStartY).toDouble()
+                                        ).toFloat()
+                                        val baseDurationMs = (420L + (pullDistPx * 0.55f).toLong()).coerceIn(460L, 640L)
+                                        val shotDurationMs = when (consecutiveUnregisteredCarromShots) {
+                                            1 -> (baseDurationMs + 80L).coerceAtMost(720L)
+                                            2 -> (baseDurationMs + 130L).coerceAtMost(760L)
+                                            else -> baseDurationMs
+                                        }
                                         PlannedAction(
                                             actionType = AgentActionType.DRAG,
                                             targetNodeId = null,

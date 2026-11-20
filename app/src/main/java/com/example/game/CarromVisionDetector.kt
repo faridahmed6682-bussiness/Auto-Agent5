@@ -146,7 +146,7 @@ object CarromVisionDetector {
 
         // 4. Color-agnostic bottom baseline striker detection (matches ANY striker color/skin/halo)
         val rawStrikerAligned = rawPieces
-            .filter { it.color == CoinColor.STRIKER }
+            .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
             .minByOrNull { p ->
                 if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
                 else abs(p.center.y - defaultBaselineY)
@@ -166,8 +166,8 @@ object CarromVisionDetector {
                 scaleY = scaleY,
                 strikerRadiusPx = strikerRadius,
                 sliderKnobPx = sliderKnobPx,
-                scanTopFraction = 0.72f,
-                scanBottomFraction = 0.93f
+                scanTopFraction = 0.70f,
+                scanBottomFraction = 0.94f
             )
         } else {
             null
@@ -409,7 +409,7 @@ object CarromVisionDetector {
 
         val defaultBaselineY = boardTop + boardHeightPx * 0.845f
         val rawStrikerAligned = rawPieces
-            .filter { it.color == CoinColor.STRIKER }
+            .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
             .minByOrNull { p ->
                 if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
                 else abs(p.center.y - defaultBaselineY)
@@ -428,8 +428,8 @@ object CarromVisionDetector {
                 scaleY = scaleY,
                 strikerRadiusPx = strikerRadius,
                 sliderKnobPx = sliderKnobPx,
-                scanTopFraction = 0.72f,
-                scanBottomFraction = 0.93f
+                scanTopFraction = 0.70f,
+                scanBottomFraction = 0.94f
             )
         } else {
             null
@@ -950,7 +950,7 @@ object CarromVisionDetector {
                 }
 
                 if (color == CoinColor.STRIKER) {
-                    if (count in 4..260) {
+                    if (count in 9..260) {
                         val coarse = Point2D(sumX / count, sumY / count)
                         val radiusApprox = (kotlin.math.sqrt(count.toFloat() / 3.14f) * SAMPLE_STEP * scaleX)
                             .coerceIn(14f, 68f)

@@ -53,6 +53,20 @@ class TapPilotAccessibilityService : AccessibilityService() {
                     }
                 }
             }
+            scope.launch {
+                combine(
+                    AgentCoordinator.carromTurnHud,
+                    AgentCoordinator.settings
+                ) { hud, settings ->
+                    hud to settings.showFloatingOverlay
+                }.collectLatest { (hud, showOverlay) ->
+                    if (showOverlay) {
+                        overlayController?.renderCarromHud(hud)
+                    } else {
+                        overlayController?.renderCarromHud(null)
+                    }
+                }
+            }
         }
         AgentCoordinator.attachService(this)
     }
@@ -91,15 +105,19 @@ class TapPilotAccessibilityService : AccessibilityService() {
     suspend fun captureSnapshot(useScreenshot: Boolean): UiSnapshot {
         val (width, height) = getScreenDimensions()
 
-        // Temporarily hide floating overlay so screenshots capture unobstructed target UI.
+        // Temporarily hide floating & aim overlays synchronously on Main so screenshots capture unobstructed target UI.
         val minFrameTs = SystemClock.uptimeMillis()
-        overlayController?.setTemporarilyHidden(true)
+        withContext(Dispatchers.Main.immediate) {
+            overlayController?.setTemporarilyHidden(true)
+        }
         val settleMs = if (LiveMediaProjectionCapturer.isLiveActive.value) 50L else 80L
         delay(settleMs)
         val captureResult = try {
             ScreenCapturer.capture(this, useScreenshot, minFrameTs)
         } finally {
-            overlayController?.setTemporarilyHidden(false)
+            withContext(NonCancellable + Dispatchers.Main.immediate) {
+                overlayController?.setTemporarilyHidden(false)
+            }
         }
 
         val appWindowRoot = windows

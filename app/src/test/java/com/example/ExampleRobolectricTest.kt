@@ -1565,14 +1565,14 @@ class ExampleRobolectricTest {
 
         org.junit.Assert.assertTrue("Expected SolvedShot on 720x1600 device, got $outcome", outcome is com.example.game.CarromVisionOutcome.SolvedShot)
         val solved = outcome as com.example.game.CarromVisionOutcome.SolvedShot
-        org.junit.Assert.assertNotNull(solved.detectedStriker)
-        org.junit.Assert.assertNotNull(solved.detectedSliderKnob)
+        val striker = requireNotNull(solved.detectedStriker)
+        requireNotNull(solved.detectedSliderKnob)
 
         val expectedScreenX = strikerBmX * 2f
         val expectedScreenY = trueBaselineY * 2f
-        assertEquals(expectedScreenX, solved.detectedStriker!!.center.x, 10f)
+        assertEquals(expectedScreenX, striker.center.x, 10f)
         // Must lock onto the REAL shifted striker Y (0.805f), NOT default 0.845f (~26px lower)
-        assertEquals(expectedScreenY, solved.detectedStriker!!.center.y, 10f)
+        assertEquals(expectedScreenY, striker.center.y, 10f)
         org.junit.Assert.assertTrue(
             "Drag end must remain clear of bottom nav bar on 720x1600: ${solved.solution.dragEnd}",
             solved.solution.dragEnd.y <= 1600f - 72f + 1f
@@ -1580,6 +1580,90 @@ class ExampleRobolectricTest {
 
         bm.recycle()
         com.example.game.CarromVisionDetector.resetMotionHistory()
+    }
+
+    @Test
+    fun `carrom turn hud populates coin trace counts aim visual and keeps drag safe from screen edges on 720x1600`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 40f,
+            top = 420f,
+            right = 680f,
+            bottom = 1060f,
+            pockets = listOf(
+                com.example.game.Point2D(72f, 452f),
+                com.example.game.Point2D(648f, 452f),
+                com.example.game.Point2D(72f, 1028f),
+                com.example.game.Point2D(648f, 1028f)
+            ),
+            baselineY = 960f,
+            coinRadiusPx = 20f,
+            strikerRadiusPx = 24f,
+            pocketRadiusPx = 30f
+        )
+        // Place striker close to left edge and aim upward-left so dragEnd pulls toward right/bottom edge
+        val edgeStriker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(120f, 960f),
+            radiusPx = 24f
+        )
+        val whiteCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(92f, 650f),
+            radiusPx = 20f
+        )
+        val blackCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(420f, 620f),
+            radiusPx = 20f
+        )
+        val queenCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.QUEEN,
+            center = com.example.game.Point2D(360f, 740f),
+            radiusPx = 20f
+        )
+        val allPieces = listOf(whiteCoin, blackCoin, queenCoin, edgeStriker)
+
+        val sol = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = allPieces,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 720,
+            screenHeight = 1600,
+            existingStriker = edgeStriker,
+            canRepositionStriker = false,
+            usePhysicsRollout = false
+        )
+        org.junit.Assert.assertNotNull("Expected valid solution", sol)
+        val solved = sol!!
+
+        org.junit.Assert.assertTrue("dragEnd.x (${solved.dragEnd.x}) must clear 28px side gesture edge", solved.dragEnd.x in 28f..(720f - 28f))
+        org.junit.Assert.assertTrue("dragEnd.y (${solved.dragEnd.y}) must clear bottom nav zone", solved.dragEnd.y in 24f..(1600f - 80f))
+
+        val memory = com.example.game.CarromTurnMemory()
+        memory.ensureTurnStarted(1_000L)
+        val hud = memory.buildHudState(
+            nowMs = 1_500L,
+            stage = com.example.game.TurnProbeStage.LOCKED_SURE_SHOT,
+            detail = "Test shot",
+            board = board,
+            tracedPieces = allPieces,
+            strikerPos = edgeStriker.center,
+            solution = solved,
+            aimSummary = "Pocket 1 • Cut 4°"
+        )
+
+        assertEquals(1, hud.whiteCount)
+        assertEquals(1, hud.blackCount)
+        org.junit.Assert.assertTrue(hud.queenVisible)
+        org.junit.Assert.assertTrue(hud.strikerLocked)
+        assertEquals("Pocket 1 • Cut 4°", hud.aimSummary)
+        val visual = requireNotNull(hud.aimVisual)
+        assertEquals(3, visual.tracedCoins.size)
+        org.junit.Assert.assertNotNull(visual.strikerCenter)
+        org.junit.Assert.assertNotNull(visual.targetCoin)
+        org.junit.Assert.assertNotNull(visual.ghostBall)
+        org.junit.Assert.assertNotNull(visual.targetPocket)
+        org.junit.Assert.assertNotNull(visual.dragEnd)
     }
 }
 

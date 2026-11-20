@@ -12,6 +12,21 @@ enum class TurnProbeStage(val badge: String) {
     WATCH_TRAINING("WATCH TRAIN")
 }
 
+data class CarromAimVisualData(
+    val boardLeft: Float,
+    val boardTop: Float,
+    val boardRight: Float,
+    val boardBottom: Float,
+    val strikerCenter: Point2D?,
+    val tracedCoins: List<CarromPiece>,
+    val targetCoin: Point2D?,
+    val ghostBall: Point2D?,
+    val targetPocket: Point2D?,
+    val dragEnd: Point2D?,
+    val cutAngleDeg: Float = 0f,
+    val isSureShot: Boolean = false
+)
+
 data class CarromTurnHudState(
     val isActive: Boolean = false,
     val elapsedSec: Float = 0f,
@@ -21,7 +36,13 @@ data class CarromTurnHudState(
     val scanCount: Int = 0,
     val rejectedCount: Int = 0,
     val stage: TurnProbeStage = TurnProbeStage.PRE_SCAN,
-    val detail: String = ""
+    val detail: String = "",
+    val whiteCount: Int = 0,
+    val blackCount: Int = 0,
+    val queenVisible: Boolean = false,
+    val strikerLocked: Boolean = false,
+    val aimSummary: String = "",
+    val aimVisual: CarromAimVisualData? = null
 )
 
 /**
@@ -345,8 +366,36 @@ class CarromTurnMemory {
     fun buildHudState(
         nowMs: Long,
         stage: TurnProbeStage,
-        detail: String = ""
+        detail: String = "",
+        board: CarromBoardLayout? = null,
+        tracedPieces: List<CarromPiece> = emptyList(),
+        strikerPos: Point2D? = null,
+        solution: CarromShotSolution? = null,
+        dragEndOverride: Point2D? = null,
+        aimSummary: String = ""
     ): CarromTurnHudState {
+        val nonStriker = tracedPieces.filter { it.color != CoinColor.STRIKER }
+        val whiteCount = nonStriker.count { it.color == CoinColor.WHITE }
+        val blackCount = nonStriker.count { it.color == CoinColor.BLACK }
+        val queenVisible = nonStriker.any { it.color == CoinColor.QUEEN }
+        val visual = if (board != null) {
+            CarromAimVisualData(
+                boardLeft = board.left,
+                boardTop = board.top,
+                boardRight = board.right,
+                boardBottom = board.bottom,
+                strikerCenter = strikerPos ?: solution?.strikerPos,
+                tracedCoins = nonStriker,
+                targetCoin = solution?.targetCoin?.center,
+                ghostBall = solution?.ghostBall,
+                targetPocket = solution?.targetPocket,
+                dragEnd = dragEndOverride ?: solution?.dragEnd,
+                cutAngleDeg = solution?.cutAngleDeg ?: 0f,
+                isSureShot = solution?.isSureShot == true
+            )
+        } else {
+            null
+        }
         return CarromTurnHudState(
             isActive = isTurnActive,
             elapsedSec = elapsedMs(nowMs) / 1000f,
@@ -356,7 +405,13 @@ class CarromTurnMemory {
             scanCount = scanCount,
             rejectedCount = rejectedSpots.size,
             stage = stage,
-            detail = detail
+            detail = detail,
+            whiteCount = whiteCount,
+            blackCount = blackCount,
+            queenVisible = queenVisible,
+            strikerLocked = strikerPos != null,
+            aimSummary = aimSummary,
+            aimVisual = visual
         )
     }
 

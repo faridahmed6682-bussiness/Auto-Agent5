@@ -1393,16 +1393,16 @@ object CarromGeometrySolver {
         val cutCompensation = (1.0 / kotlin.math.cos(cutRad)).toFloat().coerceIn(1.0f, 1.85f)
         val basePower = (totalDistance / boardWidth).coerceIn(0.45f, 1.35f)
         val effectivePower = (basePower * cutCompensation * powerMultiplier).coerceIn(0.45f, 1.75f)
-        val minPull = max(120f, boardWidth * 0.16f)
+        val minPull = max(132f, boardWidth * 0.19f)
         val maxPull = min(400f, boardWidth * 0.44f).coerceAtLeast(minPull + 20f)
         val pullLength = (boardWidth * 0.28f * effectivePower).coerceIn(minPull, maxPull)
         val pullVec = Point2D(-shotDir.x * pullLength, -shotDir.y * pullLength)
 
-        val minX = 16f
-        val maxX = max(17f, screenWidth - 16f)
-        val minY = 16f
-        // Keep pull endpoint clear of bottom system navigation/gesture bar on Android 13-15 OEMs
-        val bottomNavClearance = max(48f, screenHeight * 0.045f)
+        val minX = 28f
+        val maxX = max(29f, screenWidth - 28f)
+        val minY = 24f
+        // Keep pull endpoint clear of bottom system navigation/gesture bar and side back-swipe zones on Android 13-15 OEMs
+        val bottomNavClearance = max(56f, screenHeight * 0.05f)
         val maxY = max(minY + 1f, screenHeight - bottomNavClearance)
 
         var scale = 1f

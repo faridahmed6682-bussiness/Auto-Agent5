@@ -1528,6 +1528,30 @@ fun AgentOutcomeBanner(
                                     color = stageColor
                                 )
                             }
+                            val totalTraced = carromTurnHud.whiteCount + carromTurnHud.blackCount + if (carromTurnHud.queenVisible) 1 else 0
+                            if (totalTraced > 0 || carromTurnHud.strikerLocked) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(SlateSurfaceElevated)
+                                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "TRACED $totalTraced (W${carromTurnHud.whiteCount} B${carromTurnHud.blackCount}${if (carromTurnHud.queenVisible) " Q1" else ""}) • ${if (carromTurnHud.strikerLocked) "STRIKER ✓" else "NO STRIKER"}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (carromTurnHud.strikerLocked) CyberTeal else AmberWarning
+                                    )
+                                }
+                            }
+                        }
+                        if (carromTurnHud.aimSummary.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Aim: ${carromTurnHud.aimSummary}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ElectricCyan
+                            )
                         }
                     }
                     if (state.lastThought.isNotBlank()) {
