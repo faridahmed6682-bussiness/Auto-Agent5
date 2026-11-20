@@ -238,4 +238,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissCarromTransferStatus() {
         _carromTransferStatus.value = null
     }
+
+    fun saveBoardCalibration(profile: com.example.game.BoardCalibrationProfile) {
+        AgentCoordinator.saveBoardCalibration(profile)
+        _carromTransferStatus.value = if (profile.enabled) {
+            "Board Calibration saved (${profile.pocketsNorm.size} pockets, ${profile.customColorCount()} swatches, pull=${String.format(java.util.Locale.US, "%.2fx", profile.maxPullScale)})!"
+        } else {
+            "Board Calibration reset to Auto Geometry."
+        }
+    }
 }

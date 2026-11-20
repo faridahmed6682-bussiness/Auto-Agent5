@@ -85,6 +85,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var showContactDialog by remember { mutableStateOf(false) }
+    var showCalibrationDialog by rememberSaveable { mutableStateOf(false) }
     var editingContact by remember { mutableStateOf<ContactProfile?>(null) }
     var autoRequestedProjectionThisSession by rememberSaveable { mutableStateOf(false) }
     var launchPendingAfterProjection by remember { mutableStateOf(false) }
@@ -371,6 +372,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                         onStopTraining = viewModel::stopAgent,
                         onExportTraining = { carromExportLauncher.launch("tappilot-carrom-brain.json") },
                         onImportTraining = { carromImportLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
+                        onOpenCalibration = { showCalibrationDialog = true },
                         onDismissTransferStatus = viewModel::dismissCarromTransferStatus
                     )
                 }
@@ -503,6 +505,14 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 showContactDialog = false
                 editingContact = null
             }
+        )
+    }
+
+    if (showCalibrationDialog) {
+        CarromCalibrationDialog(
+            initialCalibration = carromMemory.boardCalibration,
+            onSaveCalibration = viewModel::saveBoardCalibration,
+            onDismiss = { showCalibrationDialog = false }
         )
     }
 }

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.util.Log
 import com.example.ai.ApiKeyFailoverManager
 import com.example.ai.GeminiAiPlanner
+import com.example.game.BoardCalibrationProfile
 import com.example.game.BoardPieceCounts
 import com.example.game.CarromCoachHelper
 import com.example.game.CarromGeometrySolver
@@ -244,6 +245,13 @@ object AgentCoordinator {
             val totalPots = importedMem.statsByBucket.values.sumOf { it.successes }
             val blockedFouls = importedMem.blockedFoulCount()
             "Imported $totalShots shots ($totalPots pots, $blockedFouls blocked fouls)!"
+        }
+    }
+
+    fun saveBoardCalibration(profile: BoardCalibrationProfile) {
+        val store = carromShotMemoryStore ?: return
+        scope.launch {
+            store.updateBoardCalibration(profile)
         }
     }
 
@@ -752,7 +760,8 @@ object AgentCoordinator {
                         val watchObs = CarromVisionDetector.observeBoardForTraining(
                             screenshot = snapshot.screenshot,
                             screenWidth = snapshot.screenWidth,
-                            screenHeight = snapshot.screenHeight
+                            screenHeight = snapshot.screenHeight,
+                            calibration = _carromMemory.value.boardCalibration
                         )
                         snapshot.screenshot?.recycle()
 
@@ -1156,7 +1165,8 @@ object AgentCoordinator {
                                         screenshot = snapshot.screenshot,
                                         screenWidth = snapshot.screenWidth,
                                         screenHeight = snapshot.screenHeight,
-                                        myCoinColor = prevShot.myCoinColor
+                                        myCoinColor = prevShot.myCoinColor,
+                                        calibration = currentCarromMem.boardCalibration
                                     )
                                 }
                                 val strikerStayedPut = outcome is CarromVisionOutcome.SolvedShot &&
@@ -1248,7 +1258,24 @@ object AgentCoordinator {
                                     carromTurnMemory.ensureTurnStarted(nowCarromMs)
 
                                     val striker = outcome.detectedStriker
-                                    val sliderKnob = outcome.detectedSliderKnob
+                                    val calProfile = currentCarromMem.boardCalibration.takeIf { it.enabled }
+                                    val sliderKnob = outcome.detectedSliderKnob ?: run {
+                                        if (striker != null && calProfile != null) {
+                                            val sliderLeftPx = calProfile.sliderTrackLeftNorm * snapshot.screenWidth
+                                            val sliderRightPx = calProfile.sliderTrackRightNorm * snapshot.screenWidth
+                                            val sliderY = calProfile.sliderTrackYNorm * snapshot.screenHeight
+                                            val strikerMargin = outcome.board.strikerRadiusPx * 2.1f
+                                            val playableSpan = (outcome.board.width - strikerMargin * 2f).coerceAtLeast(40f)
+                                            val strikerNorm = ((striker.center.x - (outcome.board.left + strikerMargin)) / playableSpan)
+                                                .coerceIn(0f, 1f)
+                                            com.example.game.Point2D(
+                                                sliderLeftPx + strikerNorm * (sliderRightPx - sliderLeftPx),
+                                                sliderY
+                                            )
+                                        } else {
+                                            null
+                                        }
+                                    }
 
                                     // Measure slider gain feedback from previous striker slide
                                     var observedGainThisStep: Float? = null
@@ -1327,7 +1354,7 @@ object AgentCoordinator {
 
                                     val isVerifiedSureHere = inPlaceSol != null && inPlaceSol.isSureShot
 
-                                    val minCorrectionPx = (outcome.board.width * 0.055f).coerceIn(28f, 54f)
+                                    val minCorrectionPx = (outcome.board.width * 0.032f).coerceIn(18f, 34f)
                                     val needsClosedLoopCorrection = !isVerifiedSureHere &&
                                         canAffordSlide &&
                                         currentSettings.useClosedLoopSliderVerify &&
@@ -1383,7 +1410,7 @@ object AgentCoordinator {
                                         val calibratedDelta = (rawDelta / turnGain).coerceIn(-maxSliderDelta, maxSliderDelta)
                                         val targetKnobEndX = (sliderKnob.x + calibratedDelta)
                                             .toInt()
-                                            .coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
+                                            .coerceIn(28, (snapshot.screenWidth - 28).coerceAtLeast(29))
 
                                         didSlideCarromThisStep = true
                                         movedStrikerThisTurn = true
@@ -1392,7 +1419,7 @@ object AgentCoordinator {
                                             targetStrikerX = slideTargetX,
                                             preStrikerX = striker.center.x,
                                             commandedDeltaX = (targetKnobEndX - sliderKnob.x.toInt()).toFloat(),
-                                            correctionAttempts = if (needsClosedLoopCorrection) (verifyState?.correctionAttempts ?: 0) + 1 else 1
+                                            correctionAttempts = if (needsClosedLoopCorrection) (verifyState?.correctionAttempts ?: 0) + 1 else 0
                                         )
                                         val remSec = carromTurnMemory.remainingMs(nowCarromMs) / 1000f
                                         val previewSol = inPlaceSol ?: outcome.solution
@@ -1414,7 +1441,7 @@ object AgentCoordinator {
                                             y = sliderKnob.y.toInt(),
                                             endX = targetKnobEndX,
                                             endY = sliderKnob.y.toInt(),
-                                            durationMs = if (kotlin.math.abs(calibratedDelta) < 120f) 140L else 185L,
+                                            durationMs = if (kotlin.math.abs(calibratedDelta) < 120f) 210L else 280L,
                                             textToType = null,
                                             waitSeconds = null,
                                             memoryNote = "Turn Memory (${carromTurnMemory.scanCount} scans, ${carromTurnMemory.rejectedProbeCount} rejected, rem=${String.format(java.util.Locale.US, "%.1f", remSec)}s): probing spot #${carromTurnMemory.sliderMovesThisTurn}/${CarromTurnMemory.MAX_BASELINE_PROBES}",

@@ -1665,5 +1665,107 @@ class ExampleRobolectricTest {
         org.junit.Assert.assertNotNull(visual.targetPocket)
         org.junit.Assert.assertNotNull(visual.dragEnd)
     }
+
+    @Test
+    fun `board calibration profile persists in carrom memory json and drives aim debug preview pockets`() {
+        val customPockets = listOf(
+            com.example.game.Point2D(0.11f, 0.28f),
+            com.example.game.Point2D(0.89f, 0.28f),
+            com.example.game.Point2D(0.11f, 0.72f),
+            com.example.game.Point2D(0.89f, 0.72f)
+        )
+        val swatch = com.example.game.CalibratedHsvColor.fromColorInt(android.graphics.Color.rgb(245, 240, 225))
+        val profile = com.example.game.BoardCalibrationProfile(
+            enabled = true,
+            boardLeftNorm = 0.06f,
+            boardTopNorm = 0.24f,
+            boardRightNorm = 0.94f,
+            boardBottomNorm = 0.76f,
+            pocketsNorm = customPockets,
+            baselineYNorm = 0.85f,
+            sliderTrackYNorm = 0.83f,
+            sliderTrackLeftNorm = 0.18f,
+            sliderTrackRightNorm = 0.82f,
+            maxPullScale = 1.18f,
+            whiteColor = swatch
+        )
+        val mem = com.example.game.CarromMemoryData(boardCalibration = profile)
+        val json = com.example.game.CarromShotMemoryStore.serializeJson(mem)
+        val decoded = com.example.game.CarromShotMemoryStore.parseJson(json)
+        org.junit.Assert.assertTrue(decoded.boardCalibration.enabled)
+        assertEquals(4, decoded.boardCalibration.pocketsNorm.size)
+        assertEquals(0.89f, decoded.boardCalibration.pocketsNorm[1].x, 0.002f)
+        assertEquals(1.18f, decoded.boardCalibration.maxPullScale, 0.002f)
+        org.junit.Assert.assertNotNull(decoded.boardCalibration.whiteColor)
+
+        // Create a synthetic 360x640 Carrom board image using direct pixel writes (Robolectric ShadowCanvas does not rasterize)
+        val bm = android.graphics.Bitmap.createBitmap(360, 640, android.graphics.Bitmap.Config.ARGB_8888)
+        bm.eraseColor(android.graphics.Color.rgb(42, 18, 16))
+        fun paintRect(left: Float, top: Float, right: Float, bottom: Float, colorInt: Int) {
+            val minX = left.toInt().coerceIn(0, bm.width - 1)
+            val maxX = right.toInt().coerceIn(0, bm.width - 1)
+            val minY = top.toInt().coerceIn(0, bm.height - 1)
+            val maxY = bottom.toInt().coerceIn(0, bm.height - 1)
+            for (y in minY..maxY) {
+                for (x in minX..maxX) {
+                    bm.setPixel(x, y, colorInt)
+                }
+            }
+        }
+        fun paintDisc(cx: Float, cy: Float, r: Float, colorInt: Int) {
+            val rSq = r * r
+            val minX = (cx - r).toInt().coerceIn(0, bm.width - 1)
+            val maxX = (cx + r).toInt().coerceIn(0, bm.width - 1)
+            val minY = (cy - r).toInt().coerceIn(0, bm.height - 1)
+            val maxY = (cy + r).toInt().coerceIn(0, bm.height - 1)
+            for (y in minY..maxY) {
+                for (x in minX..maxX) {
+                    val dx = x - cx
+                    val dy = y - cy
+                    if (dx * dx + dy * dy <= rSq) {
+                        bm.setPixel(x, y, colorInt)
+                    }
+                }
+            }
+        }
+
+        val bLeft = 360f * 0.055f
+        val bw = 360f * 0.89f
+        val bTop = (640f - bw) * 0.48f
+        val bBottom = bTop + bw
+        paintRect(bLeft, bTop, bLeft + bw, bBottom, android.graphics.Color.rgb(214, 174, 130))
+        // Dark 4 corner pockets
+        val pocketColor = android.graphics.Color.rgb(12, 12, 12)
+        val inset = bw * 0.064f
+        paintDisc(bLeft + inset, bTop + inset, 14f, pocketColor)
+        paintDisc(bLeft + bw - inset, bTop + inset, 14f, pocketColor)
+        paintDisc(bLeft + inset, bBottom - inset, 14f, pocketColor)
+        paintDisc(bLeft + bw - inset, bBottom - inset, 14f, pocketColor)
+        // White coin + Queen + cyan striker + gold slider knob
+        paintDisc(bLeft + bw * 0.34f, bTop + bw * 0.34f, 10f, android.graphics.Color.rgb(245, 245, 238))
+        paintDisc(bLeft + bw * 0.50f, bTop + bw * 0.50f, 10f, android.graphics.Color.rgb(218, 28, 36))
+        val stX = bLeft + bw * 0.52f
+        val baseY = bTop + bw * 0.845f
+        paintDisc(stX, baseY, 12f, android.graphics.Color.rgb(0, 215, 235))
+        paintDisc(stX, bBottom + 640f * 0.085f, 10f, android.graphics.Color.rgb(255, 200, 30))
+
+        val autoCal = com.example.game.CarromVisionDetector.autoDetectCalibrationFromBitmap(bm)
+        org.junit.Assert.assertTrue(autoCal.enabled)
+        assertEquals(4, autoCal.pocketsNorm.size)
+        assertEquals((bLeft + inset) / 360f, autoCal.pocketsNorm[0].x, 0.03f)
+        assertEquals((bTop + inset) / 640f, autoCal.pocketsNorm[0].y, 0.03f)
+
+        val debugOutcome = com.example.game.CarromVisionDetector.runAimDebugPreview(
+            bitmap = bm,
+            calibration = autoCal,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            isFreestyle = false
+        )
+        org.junit.Assert.assertTrue("Expected SolvedShot from Aim Debug preview, got $debugOutcome", debugOutcome is com.example.game.CarromVisionOutcome.SolvedShot)
+        val solved = debugOutcome as com.example.game.CarromVisionOutcome.SolvedShot
+        org.junit.Assert.assertNotNull(solved.detectedStriker)
+        org.junit.Assert.assertNotNull(solved.detectedSliderKnob)
+        bm.recycle()
+    }
 }
 

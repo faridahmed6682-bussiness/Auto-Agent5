@@ -1,0 +1,196 @@
+package com.example.game
+
+import android.graphics.Color
+import org.json.JSONArray
+import org.json.JSONObject
+import kotlin.math.abs
+
+data class CalibratedHsvColor(
+    val h: Float,
+    val s: Float,
+    val v: Float
+) {
+    fun matches(hsv: FloatArray, role: CoinColor): Boolean {
+        val hueDiff = circularHueDiff(hsv[0], h)
+        val satDiff = abs(hsv[1] - s)
+        val valDiff = abs(hsv[2] - v)
+        return when (role) {
+            CoinColor.WHITE -> satDiff <= 0.20f && valDiff <= 0.22f && hsv[1] <= 0.42f
+            CoinColor.BLACK -> satDiff <= 0.24f && valDiff <= 0.18f && hsv[2] <= 0.42f
+            CoinColor.QUEEN -> hueDiff <= 22f && satDiff <= 0.28f && valDiff <= 0.30f && hsv[1] >= 0.32f
+            CoinColor.STRIKER -> hueDiff <= 24f && satDiff <= 0.28f && valDiff <= 0.28f
+        }
+    }
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("h", h.toDouble())
+        .put("s", s.toDouble())
+        .put("v", v.toDouble())
+
+    companion object {
+        fun fromColorInt(colorInt: Int): CalibratedHsvColor {
+            val hsv = FloatArray(3)
+            Color.colorToHSV(colorInt, hsv)
+            return CalibratedHsvColor(hsv[0], hsv[1], hsv[2])
+        }
+
+        fun fromJson(obj: JSONObject?): CalibratedHsvColor? {
+            obj ?: return null
+            return CalibratedHsvColor(
+                h = obj.optDouble("h", 0.0).toFloat().coerceIn(0f, 360f),
+                s = obj.optDouble("s", 0.0).toFloat().coerceIn(0f, 1f),
+                v = obj.optDouble("v", 0.0).toFloat().coerceIn(0f, 1f)
+            )
+        }
+
+        private fun circularHueDiff(a: Float, b: Float): Float {
+            val raw = abs(a - b) % 360f
+            return if (raw > 180f) 360f - raw else raw
+        }
+    }
+}
+
+/**
+ * User-calibrated board geometry, 4 pocket centers, baseline/slider track positions,
+ * pull-power scale, and optional coin/striker color swatches persisted across matches.
+ */
+data class BoardCalibrationProfile(
+    val enabled: Boolean = false,
+    val boardLeftNorm: Float = 0.055f,
+    val boardTopNorm: Float = 0.24f,
+    val boardRightNorm: Float = 0.945f,
+    val boardBottomNorm: Float = 0.72f,
+    val pocketsNorm: List<Point2D> = emptyList(),
+    val baselineYNorm: Float = 0.845f,
+    val sliderTrackYNorm: Float = 0.79f,
+    val sliderTrackLeftNorm: Float = 0.18f,
+    val sliderTrackRightNorm: Float = 0.82f,
+    val coinRadiusRatio: Float = 0.029f,
+    val strikerRadiusRatio: Float = 0.036f,
+    val maxPullScale: Float = 1.0f,
+    val whiteColor: CalibratedHsvColor? = null,
+    val blackColor: CalibratedHsvColor? = null,
+    val queenColor: CalibratedHsvColor? = null,
+    val strikerColor: CalibratedHsvColor? = null
+) {
+    fun resolvedPocketsScreen(widthPx: Float, heightPx: Float): List<Point2D> {
+        if (pocketsNorm.size == 4) {
+            return pocketsNorm.map { Point2D(it.x * widthPx, it.y * heightPx) }
+        }
+        val bLeft = boardLeftNorm * widthPx
+        val bTop = boardTopNorm * heightPx
+        val bRight = boardRightNorm * widthPx
+        val bBottom = boardBottomNorm * heightPx
+        val inset = ((bRight - bLeft).coerceAtLeast(40f)) * 0.064f
+        return listOf(
+            Point2D(bLeft + inset, bTop + inset),
+            Point2D(bRight - inset, bTop + inset),
+            Point2D(bLeft + inset, bBottom - inset),
+            Point2D(bRight - inset, bBottom - inset)
+        )
+    }
+
+    fun defaultCornerPocketsNorm(): List<Point2D> {
+        if (pocketsNorm.size == 4) return pocketsNorm
+        val bw = (boardRightNorm - boardLeftNorm).coerceAtLeast(0.1f)
+        val bh = (boardBottomNorm - boardTopNorm).coerceAtLeast(0.1f)
+        val insetX = bw * 0.064f
+        val insetY = bh * 0.064f
+        return listOf(
+            Point2D(boardLeftNorm + insetX, boardTopNorm + insetY),
+            Point2D(boardRightNorm - insetX, boardTopNorm + insetY),
+            Point2D(boardLeftNorm + insetX, boardBottomNorm - insetY),
+            Point2D(boardRightNorm - insetX, boardBottomNorm - insetY)
+        )
+    }
+
+    fun colorFor(role: CoinColor): CalibratedHsvColor? = when (role) {
+        CoinColor.WHITE -> whiteColor
+        CoinColor.BLACK -> blackColor
+        CoinColor.QUEEN -> queenColor
+        CoinColor.STRIKER -> strikerColor
+    }
+
+    fun withColorFor(role: CoinColor, color: CalibratedHsvColor?): BoardCalibrationProfile = when (role) {
+        CoinColor.WHITE -> copy(whiteColor = color)
+        CoinColor.BLACK -> copy(blackColor = color)
+        CoinColor.QUEEN -> copy(queenColor = color)
+        CoinColor.STRIKER -> copy(strikerColor = color)
+    }
+
+    fun customColorCount(): Int = listOfNotNull(whiteColor, blackColor, queenColor, strikerColor).size
+
+    fun toJson(): JSONObject {
+        val pocketsArr = JSONArray()
+        for (p in pocketsNorm) {
+            pocketsArr.put(
+                JSONObject()
+                    .put("x", p.x.toDouble())
+                    .put("y", p.y.toDouble())
+            )
+        }
+        return JSONObject()
+            .put("enabled", enabled)
+            .put("boardLeftNorm", boardLeftNorm.toDouble())
+            .put("boardTopNorm", boardTopNorm.toDouble())
+            .put("boardRightNorm", boardRightNorm.toDouble())
+            .put("boardBottomNorm", boardBottomNorm.toDouble())
+            .put("pocketsNorm", pocketsArr)
+            .put("baselineYNorm", baselineYNorm.toDouble())
+            .put("sliderTrackYNorm", sliderTrackYNorm.toDouble())
+            .put("sliderTrackLeftNorm", sliderTrackLeftNorm.toDouble())
+            .put("sliderTrackRightNorm", sliderTrackRightNorm.toDouble())
+            .put("coinRadiusRatio", coinRadiusRatio.toDouble())
+            .put("strikerRadiusRatio", strikerRadiusRatio.toDouble())
+            .put("maxPullScale", maxPullScale.toDouble())
+            .apply {
+                whiteColor?.let { put("whiteColor", it.toJson()) }
+                blackColor?.let { put("blackColor", it.toJson()) }
+                queenColor?.let { put("queenColor", it.toJson()) }
+                strikerColor?.let { put("strikerColor", it.toJson()) }
+            }
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject?): BoardCalibrationProfile {
+            obj ?: return BoardCalibrationProfile()
+            val pocketsArr = obj.optJSONArray("pocketsNorm")
+            val pockets = if (pocketsArr != null && pocketsArr.length() == 4) {
+                (0 until 4).mapNotNull { idx ->
+                    val po = pocketsArr.optJSONObject(idx) ?: return@mapNotNull null
+                    Point2D(
+                        po.optDouble("x", 0.5).toFloat().coerceIn(0f, 1f),
+                        po.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f)
+                    )
+                }.takeIf { it.size == 4 } ?: emptyList()
+            } else {
+                emptyList()
+            }
+            val left = obj.optDouble("boardLeftNorm", 0.055).toFloat().coerceIn(0f, 0.45f)
+            val top = obj.optDouble("boardTopNorm", 0.24).toFloat().coerceIn(0f, 0.70f)
+            val right = obj.optDouble("boardRightNorm", 0.945).toFloat().coerceIn(left + 0.20f, 1f)
+            val bottom = obj.optDouble("boardBottomNorm", 0.72).toFloat().coerceIn(top + 0.20f, 1f)
+            val sliderLeft = obj.optDouble("sliderTrackLeftNorm", 0.18).toFloat().coerceIn(0f, 0.45f)
+            val sliderRight = obj.optDouble("sliderTrackRightNorm", 0.82).toFloat().coerceIn(sliderLeft + 0.20f, 1f)
+            return BoardCalibrationProfile(
+                enabled = obj.optBoolean("enabled", false),
+                boardLeftNorm = left,
+                boardTopNorm = top,
+                boardRightNorm = right,
+                boardBottomNorm = bottom,
+                pocketsNorm = pockets,
+                baselineYNorm = obj.optDouble("baselineYNorm", 0.845).toFloat().coerceIn(0.65f, 0.96f),
+                sliderTrackYNorm = obj.optDouble("sliderTrackYNorm", 0.79).toFloat().coerceIn(0.50f, 0.96f),
+                sliderTrackLeftNorm = sliderLeft,
+                sliderTrackRightNorm = sliderRight,
+                coinRadiusRatio = obj.optDouble("coinRadiusRatio", 0.029).toFloat().coerceIn(0.018f, 0.048f),
+                strikerRadiusRatio = obj.optDouble("strikerRadiusRatio", 0.036).toFloat().coerceIn(0.024f, 0.058f),
+                maxPullScale = obj.optDouble("maxPullScale", 1.0).toFloat().coerceIn(0.65f, 1.45f),
+                whiteColor = CalibratedHsvColor.fromJson(obj.optJSONObject("whiteColor")),
+                blackColor = CalibratedHsvColor.fromJson(obj.optJSONObject("blackColor")),
+                queenColor = CalibratedHsvColor.fromJson(obj.optJSONObject("queenColor")),
+                strikerColor = CalibratedHsvColor.fromJson(obj.optJSONObject("strikerColor"))
+            )
+        }
+    }
+}

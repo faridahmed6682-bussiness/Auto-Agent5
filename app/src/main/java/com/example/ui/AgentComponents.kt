@@ -49,6 +49,7 @@ import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WarningAmber
@@ -811,6 +812,7 @@ fun CarromWatchTrainCard(
     onStopTraining: () -> Unit,
     onExportTraining: () -> Unit = {},
     onImportTraining: () -> Unit = {},
+    onOpenCalibration: () -> Unit = {},
     onDismissTransferStatus: () -> Unit = {}
 ) {
     val activeBorderColor by animateColorAsState(
@@ -1026,6 +1028,39 @@ fun CarromWatchTrainCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onOpenCalibration,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .minimumInteractiveComponentSize()
+                    .height(48.dp)
+                    .testTag("btn_open_carrom_calibration"),
+                border = BorderStroke(
+                    1.dp,
+                    if (carromMemory.boardCalibration.enabled) CyberTeal else ElectricCyan.copy(alpha = 0.55f)
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Tune,
+                    contentDescription = null,
+                    tint = if (carromMemory.boardCalibration.enabled) CyberTeal else ElectricCyan,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (carromMemory.boardCalibration.enabled) {
+                        "${stringResource(R.string.action_open_calibration)} (ACTIVE ✓)"
+                    } else {
+                        stringResource(R.string.action_open_calibration)
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (carromMemory.boardCalibration.enabled) CyberTeal else ElectricCyan,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }

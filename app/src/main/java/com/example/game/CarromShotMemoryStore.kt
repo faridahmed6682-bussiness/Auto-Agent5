@@ -240,6 +240,7 @@ data class CarromMemoryData(
     val foulSignatures: Map<String, CarromFoulSignature> = emptyMap(),
     val cleanShotPatterns: List<CleanShotPattern> = emptyList(),
     val collisionRisks: List<CollisionRiskPattern> = emptyList(),
+    val boardCalibration: BoardCalibrationProfile = BoardCalibrationProfile(),
     val straightFoulCount: Int = 0,
     val recentTactics: List<String> = emptyList(),
     val recentFouls: List<String> = emptyList(),
@@ -708,6 +709,18 @@ class CarromShotMemoryStore(context: Context) {
         }
     }
 
+    suspend fun updateBoardCalibration(profile: BoardCalibrationProfile) {
+        mutex.withLock {
+            val cur = _memory.value
+            persistLocked(
+                cur.copy(
+                    boardCalibration = profile,
+                    lastUpdatedMs = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
     suspend fun clearAll() {
         mutex.withLock {
             persistLocked(CarromMemoryData())
@@ -1142,6 +1155,7 @@ class CarromShotMemoryStore(context: Context) {
             root.put("foulSignatures", foulSigsArray)
             root.put("cleanShotPatterns", cleanPatternsArr)
             root.put("collisionRisks", collisionRisksArr)
+            root.put("boardCalibration", data.boardCalibration.toJson())
             root.put("straightFoulCount", data.straightFoulCount)
             root.put("recentTactics", JSONArray(data.recentTactics))
             root.put("recentFouls", JSONArray(data.recentFouls))
@@ -1301,6 +1315,7 @@ class CarromShotMemoryStore(context: Context) {
                 foulSignatures = foulSigsMap,
                 cleanShotPatterns = cleanPatternsList,
                 collisionRisks = risksList,
+                boardCalibration = BoardCalibrationProfile.fromJson(root.optJSONObject("boardCalibration")),
                 straightFoulCount = root.optInt("straightFoulCount", 0).coerceAtLeast(0),
                 recentTactics = jsonList("recentTactics"),
                 recentFouls = jsonList("recentFouls"),

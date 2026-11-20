@@ -140,4 +140,8 @@
     <string name="action_import_carrom_brain">Import JSON</string>
     <string name="cd_export_carrom_brain">Export learned Carrom training JSON for GitHub backup</string>
     <string name="cd_import_carrom_brain">Import saved Carrom training JSON from device or GitHub</string>
+    <string name="calibration_title">Board Calibration &amp; Aim Lab</string>
+    <string name="action_open_calibration">Board &amp; Aim Calibration Tool</string>
+    <string name="cd_close_calibration">Close calibration tool</string>
+    <string name="cd_calibration_preview">Interactive Carrom board screenshot calibration canvas</string>
 </resources>

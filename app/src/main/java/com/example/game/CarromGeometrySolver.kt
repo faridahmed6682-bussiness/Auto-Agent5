@@ -285,6 +285,7 @@ object CarromGeometrySolver {
 
                     if (bestDirect == null || score > bestDirect.confidenceScore) {
                         val powerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
+                        val calPullScale = shotMemory?.boardCalibration?.takeIf { it.enabled }?.maxPullScale ?: 1.0f
                         val dragEnd = computeSlingshotDragEnd(
                             strikerPos = strikerPos,
                             shotDir = dirSg,
@@ -293,7 +294,7 @@ object CarromGeometrySolver {
                             screenWidth = screenWidth,
                             screenHeight = screenHeight,
                             cutAngleDeg = cutAngleDeg,
-                            powerMultiplier = effectiveMult
+                            powerMultiplier = effectiveMult * calPullScale
                         )
                         val shotLabel = if (trainingMatch != null) "Trained" else if (isHanger) "Hanger" else "Direct"
                         val pocketLabel = CarromMemoryData.pocketName(pocketIdx)
@@ -306,6 +307,7 @@ object CarromGeometrySolver {
                             pocketIndex = pocketIdx,
                             cutAngleDeg = cutAngleDeg,
                             isBankShot = false,
+                            isSureShot = !usePhysicsRollout && score >= 0.68f,
                             isTrainingMatched = trainingMatch != null,
                             powerStyle = powerStyle,
                             confidenceScore = score,
@@ -816,6 +818,7 @@ object CarromGeometrySolver {
             ((sim.verifiedPullMultiplier * 0.7f + it * 0.3f) * matchPowerGain).coerceIn(0.72f, 1.48f)
         }
         val powerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
+        val calPullScale = shotMemory?.boardCalibration?.takeIf { it.enabled }?.maxPullScale ?: 1.0f
         val dragEnd = computeSlingshotDragEnd(
             strikerPos = winner.strikerPos,
             shotDir = sim.verifiedDir,
@@ -824,7 +827,7 @@ object CarromGeometrySolver {
             screenWidth = screenWidth,
             screenHeight = screenHeight,
             cutAngleDeg = winner.cutAngleDeg,
-            powerMultiplier = effectiveMult
+            powerMultiplier = effectiveMult * calPullScale
         )
         val kindTag = when {
             winner.isBreakShot -> "T3-Break"
