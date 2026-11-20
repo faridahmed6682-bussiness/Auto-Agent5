@@ -362,6 +362,7 @@ class CarromTurnMemory {
     fun formatTurnTelemetry(nowMs: Long, sol: CarromShotSolution): String {
         val sec = elapsedMs(nowMs) / 1000f
         val status = when {
+            sol.isTrainingMatched && sol.isSureShot -> "TRAIN-SURE"
             sol.isCollisionAssistedSureShot -> "CAROM-SURE"
             sol.isSureShot -> "SURE"
             sol.isBreakShot -> "BREAK-8.2s"

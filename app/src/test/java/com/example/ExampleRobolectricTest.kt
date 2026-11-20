@@ -1326,5 +1326,166 @@ class ExampleRobolectricTest {
         bm.recycle()
         com.example.game.CarromVisionDetector.resetMotionHistory()
     }
+
+    @Test
+    fun `two-sided watch trainer saves clean shot patterns and corridor collision risks and solver uses 3-tier priority`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 400f,
+            right = 1020f,
+            bottom = 1360f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 460f),
+                com.example.game.Point2D(960f, 460f),
+                com.example.game.Point2D(120f, 1300f),
+                com.example.game.Point2D(960f, 1300f)
+            ),
+            baselineY = 1210f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+
+        // 1. Opponent top-side clean pot mirrors into bottom-side CleanShotPattern
+        val topStriker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(540f, 550f),
+            radiusPx = 35f
+        )
+        val oppTargetCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(340f, 1020f),
+            radiusPx = 28f
+        )
+        val extraWhite = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(720f, 820f),
+            radiusPx = 28f
+        )
+        val preOppObs = com.example.game.CarromWatchObservation(
+            board = board,
+            pieces = listOf(oppTargetCoin, extraWhite),
+            striker = null,
+            sliderKnob = null,
+            lumaDiff = 0f,
+            isInMotion = false,
+            isLikelyGameBoard = true,
+            topStriker = topStriker
+        )
+        val postOppObs = com.example.game.CarromWatchObservation(
+            board = board,
+            pieces = listOf(extraWhite),
+            striker = com.example.game.CarromPiece(com.example.game.CoinColor.STRIKER, com.example.game.Point2D(540f, 1210f), 35f),
+            sliderKnob = null,
+            lumaDiff = 2f,
+            isInMotion = false,
+            isLikelyGameBoard = true,
+            topStriker = null
+        )
+
+        val inferredOpp = com.example.game.CarromWatchTrainer.inferHumanShotFromFrames(
+            preShot = preOppObs,
+            postShot = postOppObs,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            isFreestyle = false,
+            turnSide = com.example.game.WatchTurnSide.OPPONENT_TOP
+        )
+        org.junit.Assert.assertNotNull(inferredOpp)
+
+        var mem = com.example.game.CarromShotMemoryStore.updateTrainingPatternsFromShot(
+            memory = com.example.game.CarromMemoryData(),
+            pendingShot = inferredOpp!!.pendingShot,
+            outcomeType = com.example.game.CarromShotOutcomeType.POCKETED_MY_COIN,
+            observedPowerHint = inferredOpp.observedPowerHint
+        )
+        org.junit.Assert.assertEquals(1, mem.cleanShotPatterns.size)
+        // Opponent aimed at Bottom-Left (2), mirrored symmetrically to Top-Left (0)
+        assertEquals(0, mem.cleanShotPatterns[0].pocketIndex)
+
+        // 2. Player missed shot with a nearby corridor obstacle saves CollisionRiskPattern
+        val targetWhite = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(330f, 680f),
+            radiusPx = 28f
+        )
+        val blockerBlack = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(435f, 945f), // sits near striker->target corridor
+            radiusPx = 28f
+        )
+        val bottomStriker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(540f, 1210f),
+            radiusPx = 35f
+        )
+        val prePlayerObs = com.example.game.CarromWatchObservation(
+            board = board,
+            pieces = listOf(targetWhite, blockerBlack, bottomStriker),
+            striker = bottomStriker,
+            sliderKnob = com.example.game.Point2D(540f, 1520f),
+            lumaDiff = 0f,
+            isInMotion = false,
+            isLikelyGameBoard = true
+        )
+        val postPlayerObs = com.example.game.CarromWatchObservation(
+            board = board,
+            pieces = listOf(
+                targetWhite,
+                blockerBlack.copy(center = com.example.game.Point2D(490f, 910f))
+            ),
+            striker = null,
+            sliderKnob = null,
+            lumaDiff = 3f,
+            isInMotion = false,
+            isLikelyGameBoard = true,
+            topStriker = topStriker
+        )
+        val inferredPlayerMiss = com.example.game.CarromWatchTrainer.inferHumanShotFromFrames(
+            preShot = prePlayerObs,
+            postShot = postPlayerObs,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            isFreestyle = false,
+            turnSide = com.example.game.WatchTurnSide.PLAYER_BOTTOM
+        )
+        org.junit.Assert.assertNotNull(inferredPlayerMiss)
+        org.junit.Assert.assertTrue(
+            "Expected nearby displaced blocker recorded in corridorObstacles",
+            inferredPlayerMiss!!.pendingShot.corridorObstacles.isNotEmpty()
+        )
+        mem = com.example.game.CarromShotMemoryStore.updateTrainingPatternsFromShot(
+            memory = mem,
+            pendingShot = inferredPlayerMiss.pendingShot,
+            outcomeType = com.example.game.CarromShotOutcomeType.MISSED_OR_NO_POT,
+            observedPowerHint = null
+        )
+        org.junit.Assert.assertTrue("Expected CollisionRiskPattern recorded", mem.collisionRisks.isNotEmpty())
+
+        // Verify JSON round-trip preserves CleanShotPattern + CollisionRiskPattern
+        val json = com.example.game.CarromShotMemoryStore.serializeJson(mem)
+        val decoded = com.example.game.CarromShotMemoryStore.parseJson(json)
+        assertEquals(mem.cleanShotPatterns.size, decoded.cleanShotPatterns.size)
+        assertEquals(mem.collisionRisks.size, decoded.collisionRisks.size)
+
+        // 3. Tier-1 Training-First solver matches slightly shifted white coin on clean board -> Sure Shot!
+        val shiftedWhite = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(348f, 705f),
+            radiusPx = 28f
+        )
+        val tier1Sol = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = listOf(shiftedWhite, bottomStriker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            existingStriker = bottomStriker,
+            canRepositionStriker = true,
+            shotMemory = decoded,
+            usePhysicsRollout = true
+        )
+        org.junit.Assert.assertNotNull(tier1Sol)
+        org.junit.Assert.assertTrue("Expected Tier-1 Sure Shot", tier1Sol!!.isSureShot)
+        org.junit.Assert.assertTrue("Expected isTrainingMatched=true on Tier-1 match", tier1Sol.isTrainingMatched)
+    }
 }
 

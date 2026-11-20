@@ -21,7 +21,9 @@ data class RolloutCandidate(
     val isBreakShot: Boolean,
     val basePullMultiplier: Float,
     val staticScore: Float,
-    val totalDistance: Float
+    val totalDistance: Float,
+    val trainingMatchScore: Float = 0f,
+    val collisionRiskPenalty: Float = 0f
 )
 
 data class RolloutVerificationResult(
@@ -36,6 +38,7 @@ data class RolloutVerificationResult(
     val isCollisionAssistedSureShot: Boolean = false,
     val rejectedDueToCollisionOrFoul: Boolean = false,
     val isSureShot: Boolean,
+    val isTrainingMatched: Boolean = false,
     val predictedStrikerPocketIndex: Int?,
     val physicsCompositeScore: Float,
     val rolloutsRun: Int,
@@ -48,7 +51,8 @@ data class RankedBaselineSpot(
     val predictedSureShot: Boolean,
     val collisionAssisted: Boolean,
     val targetCoinColor: CoinColor,
-    val pocketIndex: Int
+    val pocketIndex: Int,
+    val trainingMatchScore: Float = 0f
 )
 
 /**
@@ -308,11 +312,13 @@ object CarromPhysicsSimulator {
                 (!candidate.isBreakShot && hasSecondaryCollision && !anyCleanTargetPot)
 
             val compositeScore = (
-                bestLocalScore * 0.50f +
-                    candidate.staticScore * 0.22f +
+                bestLocalScore * 0.48f +
+                    candidate.staticScore * 0.20f +
                     robustness * 0.18f +
-                    (if (isSureShot) 0.10f else 0f) -
+                    (if (isSureShot) 0.10f else 0f) +
+                    candidate.trainingMatchScore * 0.12f -
                     (if (isCollisionAssisted) 0.03f else 0f) -
+                    candidate.collisionRiskPenalty * 0.22f -
                     heatmapRisk * 0.20f
                 ).coerceIn(0.02f, 1.0f)
 
@@ -329,6 +335,7 @@ object CarromPhysicsSimulator {
                 isCollisionAssistedSureShot = isCollisionAssisted,
                 rejectedDueToCollisionOrFoul = rejectedByCollisionOrFoul,
                 isSureShot = isSureShot,
+                isTrainingMatched = candidate.trainingMatchScore >= 0.44f,
                 predictedStrikerPocketIndex = chosenOutcome.strikerPocketIndex,
                 physicsCompositeScore = compositeScore,
                 rolloutsRun = totalRollouts,
@@ -410,6 +417,7 @@ object CarromPhysicsSimulator {
             var bestCollisionAssistedForX = false
             var bestColorForX = myCoinColor
             var bestPocketForX = 0
+            var bestTrainingMatchForX = 0f
 
             for (cand in candsAtX) {
                 var bestCandScore = Float.NEGATIVE_INFINITY
@@ -462,13 +470,20 @@ object CarromPhysicsSimulator {
 
                 val hasSecondaryCollision = !out.firstStrikerHitIsTarget || out.targetDeflectedByNonTarget || out.kissedObstacleCount > 0
                 val isSure = (out.pottedMyCoins > 0 || out.pottedQueen) && cleanAngleHits >= 2
-                val composite = (bestCandScore * 0.75f + cand.staticScore * 0.25f + if (isSure) 0.14f else 0f)
+                val composite = (
+                    bestCandScore * 0.72f +
+                        cand.staticScore * 0.24f +
+                        cand.trainingMatchScore * 0.14f -
+                        cand.collisionRiskPenalty * 0.20f +
+                        if (isSure) 0.14f else 0f
+                    )
                 if (composite > bestScoreForX) {
                     bestScoreForX = composite
                     bestSureForX = isSure
                     bestCollisionAssistedForX = isSure && hasSecondaryCollision
                     bestColorForX = cand.targetCoin.color
                     bestPocketForX = cand.pocketIndex
+                    bestTrainingMatchForX = cand.trainingMatchScore
                 }
             }
 
@@ -480,15 +495,17 @@ object CarromPhysicsSimulator {
                         predictedSureShot = bestSureForX,
                         collisionAssisted = bestCollisionAssistedForX,
                         targetCoinColor = bestColorForX,
-                        pocketIndex = bestPocketForX
+                        pocketIndex = bestPocketForX,
+                        trainingMatchScore = bestTrainingMatchForX
                     )
                 )
             }
         }
 
-        // Sort prioritized by Sure Shot flag, then score descending, and pick spots spread side-to-side
+        // Sort prioritized by Sure Shot flag, Training Pattern match, then score descending
         val sorted = evaluatedSpots.sortedWith(
             compareByDescending<RankedBaselineSpot> { it.predictedSureShot }
+                .thenByDescending { it.trainingMatchScore >= 0.44f }
                 .thenByDescending { it.predictedScore }
         )
         val picked = ArrayList<RankedBaselineSpot>(maxSpots)

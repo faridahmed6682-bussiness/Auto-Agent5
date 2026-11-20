@@ -866,7 +866,9 @@ fun CarromWatchTrainCard(
             val totalAttempts = carromMemory.statsByBucket.values.sumOf { it.attempts }
             val totalPots = carromMemory.statsByBucket.values.sumOf { it.successes }
             val blockedFouls = carromMemory.blockedFoulCount()
-            if (totalAttempts > 0 || carromMemory.matchCalibration.shotsThisMatch > 0 || blockedFouls > 0) {
+            val cleanPatternsCount = carromMemory.cleanShotPatterns.size
+            val collisionRiskCount = carromMemory.collisionRisks.count { it.riskScore() > 0.1f }
+            if (totalAttempts > 0 || carromMemory.matchCalibration.shotsThisMatch > 0 || blockedFouls > 0 || cleanPatternsCount > 0) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Box(
                     modifier = Modifier
@@ -876,13 +878,14 @@ fun CarromWatchTrainCard(
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
                     Text(
-                        text = "Learned: %d shots (%d pots) • Blocked Fouls: %d • Power %.2fx • Friction %.2fx".format(
+                        text = "Learned: %d shots (%d pots) • Patterns: %d • Collision Risks: %d • Fouls: %d • Power %.2fx".format(
                             Locale.US,
                             maxOf(totalAttempts, carromMemory.matchCalibration.shotsThisMatch),
                             totalPots,
+                            cleanPatternsCount,
+                            collisionRiskCount,
                             blockedFouls,
-                            carromMemory.matchCalibration.shotPowerGain,
-                            carromMemory.matchCalibration.frictionScale
+                            carromMemory.matchCalibration.shotPowerGain
                         ),
                         style = MaterialTheme.typography.labelSmall,
                         color = CyberTeal

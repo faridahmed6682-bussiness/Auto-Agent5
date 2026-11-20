@@ -66,6 +66,7 @@ data class CarromShotSolution(
     val isBreakShot: Boolean = false,
     val isSureShot: Boolean = false,
     val isCollisionAssistedSureShot: Boolean = false,
+    val isTrainingMatched: Boolean = false,
     val rejectedDueToCollisionOrFoul: Boolean = false,
     val powerStyle: CarromPowerStyle = CarromPowerStyle.MEDIUM,
     val confidenceScore: Float,
@@ -192,7 +193,39 @@ object CarromGeometrySolver {
                     val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
                     val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
                     val baseMult = if (isHanger) 0.85f else 1.0f
-                    val effectiveMult = baseMult * learnedPowerScale * matchPowerGain
+                    val distRatio = ((distStrikerGhost + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
+
+                    val trainingMatch = shotMemory?.matchCleanShotPattern(
+                        board = board,
+                        strikerPos = strikerPos,
+                        coinCenter = coin.center,
+                        pocketIndex = pocketIdx,
+                        cutAngleDeg = cutAngleDeg,
+                        distRatio = distRatio,
+                        obstacles = obstacles,
+                        targetCoin = coin,
+                        ghostBall = ghostBall,
+                        pocketPos = pocket
+                    )
+                    val collisionPenalty = trainingMatch?.collisionRiskPenalty
+                        ?: shotMemory?.corridorCollisionRiskPenalty(
+                            board = board,
+                            strikerPos = strikerPos,
+                            ghostBall = ghostBall,
+                            coinCenter = coin.center,
+                            pocketPos = pocket,
+                            pocketIndex = pocketIdx,
+                            cutAngleDeg = cutAngleDeg,
+                            obstacles = obstacles,
+                            excludedCoin = coin
+                        ) ?: 0f
+
+                    val patternPowerScale = if (trainingMatch != null) {
+                        (trainingMatch.recommendedPullScale * 0.65f + learnedPowerScale * 0.35f).coerceIn(0.74f, 1.36f)
+                    } else {
+                        learnedPowerScale
+                    }
+                    val effectiveMult = baseMult * patternPowerScale * matchPowerGain
                     val candPowerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
                     if (shotMemory?.isFoulBlacklisted(
                             board = board,
@@ -214,10 +247,21 @@ object CarromGeometrySolver {
                     val isCurrentStrikerPos = existingStriker != null && abs(strikerPos.x - existingStriker.center.x) < 18f
                     val existingBonus = if (isCurrentStrikerPos) (0.14f + inPlaceAdj).coerceIn(0.02f, 0.28f) else 0f
                     val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutAngleDeg) ?: 0f
+                    val trainingBoost = (trainingMatch?.matchScore ?: 0f) * 0.18f
                     val normStrikerX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
                     val heatmapPenalty = (shotMemory?.scratchHeatmap?.riskFor(pocketIdx, cutAngleDeg, normStrikerX) ?: 0f) * 0.35f
-                    val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + coverBonus + hangerBonus + existingBonus + memoryBias - heatmapPenalty)
-                        .coerceIn(0.05f, 1f)
+                    val score = (
+                        angleScore * 0.65f +
+                            distScore * 0.35f +
+                            queenBonus +
+                            coverBonus +
+                            hangerBonus +
+                            existingBonus +
+                            memoryBias +
+                            trainingBoost -
+                            collisionPenalty * 0.34f -
+                            heatmapPenalty
+                        ).coerceIn(0.05f, 1f)
 
                     directPool.add(
                         RolloutCandidate(
@@ -231,9 +275,11 @@ object CarromGeometrySolver {
                             isBankShot = false,
                             isComboShot = false,
                             isBreakShot = false,
-                            basePullMultiplier = baseMult * learnedPowerScale,
+                            basePullMultiplier = baseMult * patternPowerScale,
                             staticScore = score,
-                            totalDistance = distStrikerGhost + distCoinPocket
+                            totalDistance = distStrikerGhost + distCoinPocket,
+                            trainingMatchScore = trainingMatch?.matchScore ?: 0f,
+                            collisionRiskPenalty = collisionPenalty
                         )
                     )
 
@@ -249,7 +295,7 @@ object CarromGeometrySolver {
                             cutAngleDeg = cutAngleDeg,
                             powerMultiplier = effectiveMult
                         )
-                        val shotLabel = if (isHanger) "Hanger" else "Direct"
+                        val shotLabel = if (trainingMatch != null) "Trained" else if (isHanger) "Hanger" else "Direct"
                         val pocketLabel = CarromMemoryData.pocketName(pocketIdx)
                         bestDirect = CarromShotSolution(
                             strikerPos = strikerPos,
@@ -260,6 +306,7 @@ object CarromGeometrySolver {
                             pocketIndex = pocketIdx,
                             cutAngleDeg = cutAngleDeg,
                             isBankShot = false,
+                            isTrainingMatched = trainingMatch != null,
                             powerStyle = powerStyle,
                             confidenceScore = score,
                             reason = "$shotLabel ${coin.color.name} (${powerStyle.label}) cut=${cutAngleDeg.toInt()}° -> $pocketLabel"
@@ -269,6 +316,25 @@ object CarromGeometrySolver {
             }
         }
 
+        // Tier 1: Training Memory-First Sure Shot (verify matching CleanShotPatterns with 2D physics for zero-foul guarantee)
+        val trainingCandidates = directPool.filter { it.trainingMatchScore >= 0.44f }
+        if (usePhysicsRollout && trainingCandidates.isNotEmpty()) {
+            val verifiedTraining = refineWithPhysicsRollout(
+                board = board,
+                pieces = pieces,
+                myCoinColor = myCoinColor,
+                candidates = trainingCandidates,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                shotMemory = shotMemory,
+                isFreestyle = isFreestyle
+            )
+            if (verifiedTraining != null && verifiedTraining.isSureShot) {
+                return verifiedTraining
+            }
+        }
+
+        // Tier 2: Hybrid Engine + Training Calibration (friction, powerGain, jawSafety, foul/collision risks)
         var directRejectedByPhysics = false
         var bestNonSureDirectVerified: CarromShotSolution? = null
         if (usePhysicsRollout && directPool.isNotEmpty() && (bestDirect == null || bestDirect.confidenceScore >= 0.45f)) {
@@ -516,7 +582,38 @@ object CarromGeometrySolver {
                     val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
                     val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg) ?: 1.0f
                     val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
-                    val baseMult = (if (isHanger) 0.85f else 1.0f) * learnedScale
+                    val distRatio = ((distSg + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
+
+                    val trainingMatch = shotMemory?.matchCleanShotPattern(
+                        board = board,
+                        strikerPos = strikerPos,
+                        coinCenter = coin.center,
+                        pocketIndex = pocketIdx,
+                        cutAngleDeg = cutDeg,
+                        distRatio = distRatio,
+                        obstacles = obstacles,
+                        targetCoin = coin,
+                        ghostBall = ghostBall,
+                        pocketPos = pocket
+                    )
+                    val collisionPenalty = trainingMatch?.collisionRiskPenalty
+                        ?: shotMemory?.corridorCollisionRiskPenalty(
+                            board = board,
+                            strikerPos = strikerPos,
+                            ghostBall = ghostBall,
+                            coinCenter = coin.center,
+                            pocketPos = pocket,
+                            pocketIndex = pocketIdx,
+                            cutAngleDeg = cutDeg,
+                            obstacles = obstacles,
+                            excludedCoin = coin
+                        ) ?: 0f
+                    val patternScale = if (trainingMatch != null) {
+                        (trainingMatch.recommendedPullScale * 0.65f + learnedScale * 0.35f).coerceIn(0.74f, 1.36f)
+                    } else {
+                        learnedScale
+                    }
+                    val baseMult = (if (isHanger) 0.85f else 1.0f) * patternScale
                     val candPowerStyle = CarromPowerStyle.fromPullMultiplier(baseMult * matchPowerGain)
                     if (shotMemory?.isFoulBlacklisted(
                             board = board,
@@ -533,9 +630,10 @@ object CarromGeometrySolver {
                     val obstructionBias = if (clearCoinToPocket && clearStrikerToGhost) 0f else -0.18f
                     val queenBonus = if (coin.color == CoinColor.QUEEN) 0.09f else 0f
                     val hangerBonus = if (isHanger) 0.14f else 0f
+                    val trainingBoost = (trainingMatch?.matchScore ?: 0f) * 0.18f
                     val angleScore = 1f - (cutDeg / 66f) * 0.55f
                     val distScore = 1f - ((distCoinPocket + distSg) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
-                    val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + hangerBonus + obstructionBias)
+                    val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + hangerBonus + obstructionBias + trainingBoost - collisionPenalty * 0.30f)
                         .coerceIn(0.05f, 1f)
 
                     pool.add(
@@ -552,7 +650,9 @@ object CarromGeometrySolver {
                             isBreakShot = false,
                             basePullMultiplier = baseMult,
                             staticScore = score,
-                            totalDistance = distSg + distCoinPocket
+                            totalDistance = distSg + distCoinPocket,
+                            trainingMatchScore = trainingMatch?.matchScore ?: 0f,
+                            collisionRiskPenalty = collisionPenalty
                         )
                     )
                 }
@@ -727,12 +827,13 @@ object CarromGeometrySolver {
             powerMultiplier = effectiveMult
         )
         val kindTag = when {
-            winner.isBreakShot -> "Break"
-            sim.isCollisionAssistedSureShot -> "CAROM-SURE"
-            sim.isSureShot -> "SURE"
-            winner.isComboShot -> "Combo"
-            winner.isBankShot -> "1-Rail Bank"
-            else -> "2D-Sim"
+            winner.isBreakShot -> "T3-Break"
+            sim.isTrainingMatched && sim.isSureShot -> "T1-TRAIN-SURE"
+            sim.isCollisionAssistedSureShot -> "T2-CAROM-SURE"
+            sim.isSureShot -> "T2-HYBRID-SURE"
+            winner.isComboShot -> "T3-Combo"
+            winner.isBankShot -> "T3-Bank"
+            else -> "T2-Sim"
         }
         val kissTag = when {
             sim.isCollisionAssistedSureShot -> ", carom-pot"
@@ -754,6 +855,7 @@ object CarromGeometrySolver {
             isBreakShot = winner.isBreakShot,
             isSureShot = sim.isSureShot,
             isCollisionAssistedSureShot = sim.isCollisionAssistedSureShot,
+            isTrainingMatched = sim.isTrainingMatched,
             rejectedDueToCollisionOrFoul = sim.rejectedDueToCollisionOrFoul,
             powerStyle = powerStyle,
             confidenceScore = if (sim.predictedKissBlock) {

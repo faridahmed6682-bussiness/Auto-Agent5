@@ -430,6 +430,7 @@ object AgentCoordinator {
                 var pendingLauncherStageTag: String? = null
                 var carromOfflineWaits = 0
                 var didSlideCarromThisStep = false
+                var isCarromOfflineWait = false
                 var movedStrikerThisTurn = false
                 var pendingSliderVerify: PendingSliderVerify? = null
                 var pendingCarromShot: PendingCarromShotRecord? = null
@@ -1074,6 +1075,7 @@ object AgentCoordinator {
                         launcherDecision.action
                     } else {
                         didSlideCarromThisStep = false
+                        isCarromOfflineWait = false
                         val localCarromAction: PlannedAction? = if (
                             currentSettings.carromPrecisionSolver &&
                             isActiveCarromMatchScreen &&
@@ -1097,7 +1099,8 @@ object AgentCoordinator {
                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
                                 useSubPixelRefinement = currentSettings.useSubPixelCircleRefinement,
                                 isFreestyle = isFreestyleMode,
-                                queenPendingCover = queenPendingCover
+                                queenPendingCover = queenPendingCover,
+                                isLiveStream = isLiveStream
                             )
 
                             // Evaluate the previous Carrom shot once coins have stopped moving
@@ -1163,6 +1166,7 @@ object AgentCoordinator {
                             when (outcome) {
                                 is CarromVisionOutcome.WaitStillnessOrTurn -> {
                                     carromOfflineWaits++
+                                    isCarromOfflineWait = true
                                     pendingSliderVerify = null
                                     carromTurnMemory.resetTurn()
                                     _carromTurnHud.value = null
@@ -1172,7 +1176,7 @@ object AgentCoordinator {
                                         x = null,
                                         y = null,
                                         textToType = null,
-                                        waitSeconds = if (isLiveStream) 1 else 2,
+                                        waitSeconds = 1,
                                         memoryNote = null,
                                         reason = outcome.reason,
                                         requiresConfirmation = false
@@ -1752,6 +1756,22 @@ object AgentCoordinator {
                     }
 
                     if (plannedAction.actionType == AgentActionType.WAIT) {
+                        if (isCarromOfflineWait) {
+                            val fastWaitMs = if (LiveMediaProjectionCapturer.isLiveActive.value) 280L else 850L
+                            _uiState.value = AgentUiState.Running(
+                                goal = goal,
+                                mode = mode,
+                                currentStep = step,
+                                maxSteps = maxStepsLimit,
+                                phase = AgentPhase.OBSERVING,
+                                lastThought = plannedAction.reason,
+                                workingMemory = workingMemory,
+                                trace = trace.toList()
+                            )
+                            delay(fastWaitMs)
+                            step++
+                            continue
+                        }
                         val waitSec = plannedAction.waitSeconds
                             ?: if (mode == AgentExecutionMode.CONTINUOUS_MONITOR) {
                                 currentSettings.monitorIntervalSec

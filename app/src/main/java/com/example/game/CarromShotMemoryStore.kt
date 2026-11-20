@@ -19,6 +19,8 @@ private const val CARROM_MEMORY_FILE = "tappilot_carrom_memory.json"
 private const val CARROM_BUNDLE_FORMAT = "tappilot_carrom_training_bundle_v1"
 private const val MAX_RECENT_LESSONS = 16
 private const val MAX_FOUL_SIGNATURES = 250
+private const val MAX_CLEAN_SHOT_PATTERNS = 120
+private const val MAX_COLLISION_RISKS = 140
 
 enum class CarromAngleBucket(val label: String) {
     STRAIGHT("Straight (0-14°)"),
@@ -181,12 +183,63 @@ data class CarromFoulSignature(
     fun isBlocked(): Boolean = foulCount >= 1 && foulCount > cleanSuccessCount
 }
 
+data class CorridorObstacleObservation(
+    val segment: String, // "STRIKER_TO_COIN" or "COIN_TO_POCKET"
+    val alongRatio: Float,
+    val lateralOffsetInRadii: Float,
+    val displacedOrKissed: Boolean,
+    val obstacleColor: CoinColor = CoinColor.BLACK
+)
+
+data class CleanShotPattern(
+    val patternId: String,
+    val pocketIndex: Int,
+    val strikerNormalizedX: Float,
+    val coinNormX: Float,
+    val coinNormY: Float,
+    val cutAngleDeg: Float,
+    val distRatio: Float,
+    val powerStyle: CarromPowerStyle,
+    val observedPullScale: Float = 1.0f,
+    val minCorridorClearanceRadii: Float = 3.5f,
+    val wasCollisionAssisted: Boolean = false,
+    val successCount: Int = 1,
+    val lastUsedMs: Long = 0L
+)
+
+data class CollisionRiskPattern(
+    val riskKey: String,
+    val pocketIndex: Int,
+    val angleBucket: CarromAngleBucket,
+    val corridorSegment: String,
+    val blockerAlongBucket: Int, // 0..3 along segment
+    val blockerLateralInRadii: Float, // 0..3.5R
+    val foulOrMissCount: Int = 1,
+    val cleanPotDespiteNearCount: Int = 0,
+    val lastSeenMs: Long = 0L
+) {
+    fun riskScore(): Float {
+        val net = foulOrMissCount - cleanPotDespiteNearCount * 0.8f
+        if (net <= 0f) return 0f
+        return (0.28f + net * 0.16f).coerceIn(0f, 0.92f)
+    }
+}
+
+data class TrainingMatchResult(
+    val matchScore: Float,
+    val pattern: CleanShotPattern,
+    val collisionRiskPenalty: Float,
+    val recommendedPullScale: Float
+)
+
 data class CarromMemoryData(
     val statsByBucket: Map<String, PocketShotStats> = emptyMap(),
     val placementStats: StrikerPlacementStats = StrikerPlacementStats(),
     val scratchHeatmap: ScratchZoneHeatmap = ScratchZoneHeatmap(),
     val matchCalibration: MatchPhysicsCalibration = MatchPhysicsCalibration(),
     val foulSignatures: Map<String, CarromFoulSignature> = emptyMap(),
+    val cleanShotPatterns: List<CleanShotPattern> = emptyList(),
+    val collisionRisks: List<CollisionRiskPattern> = emptyList(),
     val straightFoulCount: Int = 0,
     val recentTactics: List<String> = emptyList(),
     val recentFouls: List<String> = emptyList(),
@@ -263,6 +316,163 @@ data class CarromMemoryData(
 
     fun needsExtraScratchGuard(): Boolean = straightFoulCount >= 1
 
+    fun matchCleanShotPattern(
+        board: CarromBoardLayout,
+        strikerPos: Point2D,
+        coinCenter: Point2D,
+        pocketIndex: Int,
+        cutAngleDeg: Float,
+        distRatio: Float,
+        obstacles: List<CarromPiece>,
+        targetCoin: CarromPiece,
+        ghostBall: Point2D,
+        pocketPos: Point2D
+    ): TrainingMatchResult? {
+        if (cleanShotPatterns.isEmpty()) return null
+        val strikerNormX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
+        val coinNormX = ((coinCenter.x - board.left) / board.width).coerceIn(0f, 1f)
+        val coinNormY = ((coinCenter.y - board.top) / board.height).coerceIn(0f, 1f)
+
+        val collisionPenalty = corridorCollisionRiskPenalty(
+            board = board,
+            strikerPos = strikerPos,
+            ghostBall = ghostBall,
+            coinCenter = coinCenter,
+            pocketPos = pocketPos,
+            pocketIndex = pocketIndex,
+            cutAngleDeg = cutAngleDeg,
+            obstacles = obstacles,
+            excludedCoin = targetCoin
+        )
+
+        val minCurrentClearance = computeMinCorridorClearanceRadii(
+            board = board,
+            strikerPos = strikerPos,
+            ghostBall = ghostBall,
+            coinCenter = coinCenter,
+            pocketPos = pocketPos,
+            obstacles = obstacles,
+            excludedCoin = targetCoin
+        )
+
+        var best: TrainingMatchResult? = null
+        for (pattern in cleanShotPatterns) {
+            if (pattern.pocketIndex != pocketIndex) continue
+            val angleDiff = kotlin.math.abs(pattern.cutAngleDeg - cutAngleDeg)
+            if (angleDiff > 16f) continue
+            val coinDist = kotlin.math.hypot(pattern.coinNormX - coinNormX, pattern.coinNormY - coinNormY)
+            if (coinDist > 0.28f) continue
+            val strikerDiff = kotlin.math.abs(pattern.strikerNormalizedX - strikerNormX)
+            if (strikerDiff > 0.26f) continue
+
+            val angleSim = (1f - angleDiff / 16f).coerceIn(0f, 1f)
+            val coinSim = (1f - coinDist / 0.28f).coerceIn(0f, 1f)
+            val strikerSim = (1f - strikerDiff / 0.26f).coerceIn(0f, 1f)
+            val distSim = (1f - (kotlin.math.abs(pattern.distRatio - distRatio) / 0.65f)).coerceIn(0f, 1f)
+            val repBonus = (pattern.successCount.coerceAtMost(5) * 0.04f)
+            val clearanceBonus = if (minCurrentClearance >= pattern.minCorridorClearanceRadii * 0.9f) 0.08f else -0.14f
+
+            val rawScore = (angleSim * 0.36f + coinSim * 0.26f + strikerSim * 0.22f + distSim * 0.16f + repBonus + clearanceBonus - collisionPenalty * 0.55f)
+                .coerceIn(0f, 1f)
+
+            if (rawScore >= 0.44f && (best == null || rawScore > best.matchScore)) {
+                best = TrainingMatchResult(
+                    matchScore = rawScore,
+                    pattern = pattern,
+                    collisionRiskPenalty = collisionPenalty,
+                    recommendedPullScale = pattern.observedPullScale
+                )
+            }
+        }
+        return best
+    }
+
+    fun corridorCollisionRiskPenalty(
+        board: CarromBoardLayout,
+        strikerPos: Point2D,
+        ghostBall: Point2D,
+        coinCenter: Point2D,
+        pocketPos: Point2D,
+        pocketIndex: Int,
+        cutAngleDeg: Float,
+        obstacles: List<CarromPiece>,
+        excludedCoin: CarromPiece?
+    ): Float {
+        if (collisionRisks.isEmpty() || obstacles.isEmpty()) return 0f
+        val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
+        val relevant = collisionRisks.filter { it.pocketIndex == pocketIndex && it.angleBucket == bucket && it.riskScore() > 0.05f }
+        if (relevant.isEmpty()) return 0f
+
+        val coinR = board.coinRadiusPx.coerceAtLeast(10f)
+        var maxPenalty = 0f
+
+        for (obs in obstacles) {
+            if (excludedCoin != null &&
+                kotlin.math.abs(obs.center.x - excludedCoin.center.x) < 2f &&
+                kotlin.math.abs(obs.center.y - excludedCoin.center.y) < 2f
+            ) continue
+
+            val s1 = projectOntoSegment(obs.center, strikerPos, ghostBall, coinR)
+            val s2 = projectOntoSegment(obs.center, coinCenter, pocketPos, coinR)
+
+            for (risk in relevant) {
+                val segProj = if (risk.corridorSegment == "STRIKER_TO_COIN") s1 else s2
+                if (segProj != null) {
+                    val alongBucket = (segProj.first * 4f).toInt().coerceIn(0, 3)
+                    if (alongBucket == risk.blockerAlongBucket &&
+                        segProj.second <= (risk.blockerLateralInRadii + 0.65f)
+                    ) {
+                        maxPenalty = maxOf(maxPenalty, risk.riskScore() * 0.72f)
+                    }
+                }
+            }
+        }
+        return maxPenalty.coerceIn(0f, 0.70f)
+    }
+
+    private fun computeMinCorridorClearanceRadii(
+        board: CarromBoardLayout,
+        strikerPos: Point2D,
+        ghostBall: Point2D,
+        coinCenter: Point2D,
+        pocketPos: Point2D,
+        obstacles: List<CarromPiece>,
+        excludedCoin: CarromPiece
+    ): Float {
+        val coinR = board.coinRadiusPx.coerceAtLeast(10f)
+        var minRadii = 5.0f
+        for (obs in obstacles) {
+            if (kotlin.math.abs(obs.center.x - excludedCoin.center.x) < 2f &&
+                kotlin.math.abs(obs.center.y - excludedCoin.center.y) < 2f
+            ) continue
+            projectOntoSegment(obs.center, strikerPos, ghostBall, coinR)?.let {
+                if (it.second < minRadii) minRadii = it.second
+            }
+            projectOntoSegment(obs.center, coinCenter, pocketPos, coinR)?.let {
+                if (it.second < minRadii) minRadii = it.second
+            }
+        }
+        return minRadii
+    }
+
+    private fun projectOntoSegment(
+        point: Point2D,
+        start: Point2D,
+        end: Point2D,
+        coinRadiusPx: Float
+    ): Pair<Float, Float>? {
+        val dx = end.x - start.x
+        val dy = end.y - start.y
+        val lenSq = dx * dx + dy * dy
+        if (lenSq < 1f) return null
+        val t = (((point.x - start.x) * dx + (point.y - start.y) * dy) / lenSq)
+        if (t < 0.04f || t > 0.96f) return null
+        val projX = start.x + dx * t
+        val projY = start.y + dy * t
+        val latRadii = kotlin.math.hypot(point.x - projX, point.y - projY) / coinRadiusPx
+        return t to latRadii
+    }
+
     fun formatForPrompt(): String {
         if (statsByBucket.isEmpty() && foulSignatures.isEmpty() && recentTactics.isEmpty() && recentFouls.isEmpty()) {
             return ""
@@ -299,8 +509,22 @@ data class CarromMemoryData(
         val tacticsText = recentTactics.takeLast(5).joinToString("\n") { "+ $it" }
         val foulsText = recentFouls.takeLast(5).joinToString("\n") { "! $it" }
 
+        val cleanPatternsNote = if (cleanShotPatterns.isNotEmpty()) {
+            "Saved Clean Sure-Shot Patterns: ${cleanShotPatterns.size} (${cleanShotPatterns.sumOf { it.successCount }} clean training pots)"
+        } else {
+            null
+        }
+        val collisionRisksNote = if (collisionRisks.isNotEmpty()) {
+            val activeRisks = collisionRisks.count { it.riskScore() > 0.2f }
+            "Saved Corridor Collision Risks: $activeRisks active obstacle pattern(s)"
+        } else {
+            null
+        }
+
         return listOfNotNull(
             "CARROM ADAPTIVE SHOT MEMORY (LEARNED FROM YOUR LIVE MATCHES):",
+            cleanPatternsNote,
+            collisionRisksNote,
             bestBuckets.takeIf { it.isNotBlank() }?.let { "Best Pockets & Angles:\n$it" },
             foulBuckets.takeIf { it.isNotBlank() }?.let { "Known Foul Patterns:\n$it" },
             blockedSigsText.takeIf { it.isNotBlank() }?.let { "HARD-BLOCKED FOUL SIGNATURES (NEVER SHOOT THESE):\n$it" },
@@ -371,7 +595,13 @@ data class PendingCarromShotRecord(
     val isBreakShot: Boolean,
     val preCounts: BoardPieceCounts,
     val isFreestyle: Boolean = false,
-    val timestampMs: Long = System.currentTimeMillis()
+    val timestampMs: Long = System.currentTimeMillis(),
+    val coinNormX: Float = 0.5f,
+    val coinNormY: Float = 0.5f,
+    val distRatio: Float = 0.7f,
+    val observedPullScale: Float = 1.0f,
+    val minCorridorClearanceRadii: Float = 3.5f,
+    val corridorObstacles: List<CorridorObstacleObservation> = emptyList()
 )
 
 data class CarromEvaluationResult(
@@ -432,22 +662,31 @@ class CarromShotMemoryStore(context: Context) {
                 recordFoulSignatures = !isOpponentSide,
                 recordPlacementStats = !isOpponentSide
             )
-            val blendedMemory = if (
-                observedPowerHint != null &&
+            var updatedMem = evaluated.updatedMemory
+            if (observedPowerHint != null &&
                 (evaluated.outcomeType == CarromShotOutcomeType.POCKETED_MY_COIN ||
                     evaluated.outcomeType == CarromShotOutcomeType.POCKETED_QUEEN)
             ) {
-                val cal = evaluated.updatedMemory.matchCalibration
+                val cal = updatedMem.matchCalibration
                 val clampedHint = observedPowerHint.coerceIn(0.80f, 1.25f)
                 val newGain = ((cal.shotPowerGain * 0.85f) + (clampedHint * 0.15f)).coerceIn(0.78f, 1.28f)
-                evaluated.updatedMemory.copy(
+                updatedMem = updatedMem.copy(
                     matchCalibration = cal.copy(shotPowerGain = newGain)
                 )
-            } else {
-                evaluated.updatedMemory
             }
-            persistLocked(blendedMemory)
-            evaluated.copy(updatedMemory = blendedMemory)
+
+            // Record both-sided training patterns:
+            // 1) Clean foul-free pots -> CleanShotPattern library
+            // 2) Nearby corridor obstacle collisions/misses -> CollisionRiskPattern map
+            updatedMem = updateTrainingPatternsFromShot(
+                memory = updatedMem,
+                pendingShot = pendingShot,
+                outcomeType = evaluated.outcomeType,
+                observedPowerHint = observedPowerHint
+            )
+
+            persistLocked(updatedMem)
+            evaluated.copy(updatedMemory = updatedMem)
         }
     }
 
@@ -860,11 +1099,49 @@ class CarromShotMemoryStore(context: Context) {
                 )
             }
 
+            val cleanPatternsArr = JSONArray()
+            for (pat in data.cleanShotPatterns) {
+                cleanPatternsArr.put(
+                    JSONObject()
+                        .put("patternId", pat.patternId)
+                        .put("pocketIndex", pat.pocketIndex)
+                        .put("strikerNormalizedX", pat.strikerNormalizedX.toDouble())
+                        .put("coinNormX", pat.coinNormX.toDouble())
+                        .put("coinNormY", pat.coinNormY.toDouble())
+                        .put("cutAngleDeg", pat.cutAngleDeg.toDouble())
+                        .put("distRatio", pat.distRatio.toDouble())
+                        .put("powerStyle", pat.powerStyle.name)
+                        .put("observedPullScale", pat.observedPullScale.toDouble())
+                        .put("minCorridorClearanceRadii", pat.minCorridorClearanceRadii.toDouble())
+                        .put("wasCollisionAssisted", pat.wasCollisionAssisted)
+                        .put("successCount", pat.successCount)
+                        .put("lastUsedMs", pat.lastUsedMs)
+                )
+            }
+
+            val collisionRisksArr = JSONArray()
+            for (risk in data.collisionRisks) {
+                collisionRisksArr.put(
+                    JSONObject()
+                        .put("riskKey", risk.riskKey)
+                        .put("pocketIndex", risk.pocketIndex)
+                        .put("angleBucket", risk.angleBucket.name)
+                        .put("corridorSegment", risk.corridorSegment)
+                        .put("blockerAlongBucket", risk.blockerAlongBucket)
+                        .put("blockerLateralInRadii", risk.blockerLateralInRadii.toDouble())
+                        .put("foulOrMissCount", risk.foulOrMissCount)
+                        .put("cleanPotDespiteNearCount", risk.cleanPotDespiteNearCount)
+                        .put("lastSeenMs", risk.lastSeenMs)
+                )
+            }
+
             root.put("buckets", bucketsArray)
             root.put("placementStats", placementObj)
             root.put("scratchHeatmap", heatmapObj)
             root.put("matchCalibration", calObj)
             root.put("foulSignatures", foulSigsArray)
+            root.put("cleanShotPatterns", cleanPatternsArr)
+            root.put("collisionRisks", collisionRisksArr)
             root.put("straightFoulCount", data.straightFoulCount)
             root.put("recentTactics", JSONArray(data.recentTactics))
             root.put("recentFouls", JSONArray(data.recentFouls))
@@ -966,16 +1243,194 @@ class CarromShotMemoryStore(context: Context) {
                 )
             }
 
+            val cleanPatternsArr = root.optJSONArray("cleanShotPatterns") ?: JSONArray()
+            val cleanPatternsList = ArrayList<CleanShotPattern>(cleanPatternsArr.length())
+            for (i in 0 until cleanPatternsArr.length()) {
+                val obj = cleanPatternsArr.optJSONObject(i) ?: continue
+                val id = obj.optString("patternId").takeIf { it.isNotBlank() } ?: continue
+                val pStyle = runCatching {
+                    CarromPowerStyle.valueOf(obj.optString("powerStyle", CarromPowerStyle.MEDIUM.name))
+                }.getOrDefault(CarromPowerStyle.MEDIUM)
+                cleanPatternsList.add(
+                    CleanShotPattern(
+                        patternId = id,
+                        pocketIndex = obj.optInt("pocketIndex", 0).coerceIn(0, 3),
+                        strikerNormalizedX = obj.optDouble("strikerNormalizedX", 0.5).toFloat().coerceIn(0f, 1f),
+                        coinNormX = obj.optDouble("coinNormX", 0.5).toFloat().coerceIn(0f, 1f),
+                        coinNormY = obj.optDouble("coinNormY", 0.5).toFloat().coerceIn(0f, 1f),
+                        cutAngleDeg = obj.optDouble("cutAngleDeg", 15.0).toFloat().coerceIn(0f, 68f),
+                        distRatio = obj.optDouble("distRatio", 0.7).toFloat().coerceIn(0.15f, 1.8f),
+                        powerStyle = pStyle,
+                        observedPullScale = obj.optDouble("observedPullScale", 1.0).toFloat().coerceIn(0.72f, 1.38f),
+                        minCorridorClearanceRadii = obj.optDouble("minCorridorClearanceRadii", 3.5).toFloat().coerceIn(0.5f, 6.0f),
+                        wasCollisionAssisted = obj.optBoolean("wasCollisionAssisted", false),
+                        successCount = obj.optInt("successCount", 1).coerceAtLeast(1),
+                        lastUsedMs = obj.optLong("lastUsedMs", 0L)
+                    )
+                )
+            }
+
+            val risksArr = root.optJSONArray("collisionRisks") ?: JSONArray()
+            val risksList = ArrayList<CollisionRiskPattern>(risksArr.length())
+            for (i in 0 until risksArr.length()) {
+                val obj = risksArr.optJSONObject(i) ?: continue
+                val key = obj.optString("riskKey").takeIf { it.isNotBlank() } ?: continue
+                val angleBucket = runCatching {
+                    CarromAngleBucket.valueOf(obj.optString("angleBucket", CarromAngleBucket.MEDIUM_CUT.name))
+                }.getOrDefault(CarromAngleBucket.MEDIUM_CUT)
+                risksList.add(
+                    CollisionRiskPattern(
+                        riskKey = key,
+                        pocketIndex = obj.optInt("pocketIndex", 0).coerceIn(0, 3),
+                        angleBucket = angleBucket,
+                        corridorSegment = obj.optString("corridorSegment", "STRIKER_TO_COIN"),
+                        blockerAlongBucket = obj.optInt("blockerAlongBucket", 1).coerceIn(0, 3),
+                        blockerLateralInRadii = obj.optDouble("blockerLateralInRadii", 1.5).toFloat().coerceIn(0f, 4.0f),
+                        foulOrMissCount = obj.optInt("foulOrMissCount", 1).coerceAtLeast(0),
+                        cleanPotDespiteNearCount = obj.optInt("cleanPotDespiteNearCount", 0).coerceAtLeast(0),
+                        lastSeenMs = obj.optLong("lastSeenMs", 0L)
+                    )
+                )
+            }
+
             return CarromMemoryData(
                 statsByBucket = map,
                 placementStats = placementStats,
                 scratchHeatmap = ScratchZoneHeatmap(heatmapMap),
                 matchCalibration = calibration,
                 foulSignatures = foulSigsMap,
+                cleanShotPatterns = cleanPatternsList,
+                collisionRisks = risksList,
                 straightFoulCount = root.optInt("straightFoulCount", 0).coerceAtLeast(0),
                 recentTactics = jsonList("recentTactics"),
                 recentFouls = jsonList("recentFouls"),
                 lastUpdatedMs = root.optLong("lastUpdatedMs", 0L)
+            )
+        }
+
+        internal fun updateTrainingPatternsFromShot(
+            memory: CarromMemoryData,
+            pendingShot: PendingCarromShotRecord,
+            outcomeType: CarromShotOutcomeType,
+            observedPowerHint: Float?
+        ): CarromMemoryData {
+            if (pendingShot.isBreakShot) return memory
+            val pocketIdx = pendingShot.pocketIndex.coerceIn(0, 3)
+            val angleBucket = CarromAngleBucket.fromAngle(pendingShot.cutAngleDeg)
+            val isCleanPot = outcomeType == CarromShotOutcomeType.POCKETED_MY_COIN ||
+                outcomeType == CarromShotOutcomeType.POCKETED_QUEEN
+
+            val updatedPatterns = memory.cleanShotPatterns.toMutableList()
+            val updatedRisks = memory.collisionRisks.associateBy { it.riskKey }.toMutableMap()
+
+            if (isCleanPot) {
+                val pullScale = (observedPowerHint ?: pendingShot.observedPullScale).coerceIn(0.75f, 1.35f)
+                val kissAssisted = pendingShot.corridorObstacles.any { it.displacedOrKissed && it.lateralOffsetInRadii <= 2.4f }
+                val existingIdx = updatedPatterns.indexOfFirst { pat ->
+                    pat.pocketIndex == pocketIdx &&
+                        kotlin.math.abs(pat.cutAngleDeg - pendingShot.cutAngleDeg) <= 7.5f &&
+                        kotlin.math.hypot(pat.coinNormX - pendingShot.coinNormX, pat.coinNormY - pendingShot.coinNormY) <= 0.14f &&
+                        kotlin.math.abs(pat.strikerNormalizedX - pendingShot.strikerNormalizedX) <= 0.14f
+                }
+                if (existingIdx >= 0) {
+                    val prev = updatedPatterns[existingIdx]
+                    val n = prev.successCount.coerceAtMost(8)
+                    updatedPatterns[existingIdx] = prev.copy(
+                        strikerNormalizedX = (prev.strikerNormalizedX * n + pendingShot.strikerNormalizedX) / (n + 1),
+                        coinNormX = (prev.coinNormX * n + pendingShot.coinNormX) / (n + 1),
+                        coinNormY = (prev.coinNormY * n + pendingShot.coinNormY) / (n + 1),
+                        cutAngleDeg = (prev.cutAngleDeg * n + pendingShot.cutAngleDeg) / (n + 1),
+                        distRatio = (prev.distRatio * n + pendingShot.distRatio) / (n + 1),
+                        observedPullScale = ((prev.observedPullScale * n + pullScale) / (n + 1)).coerceIn(0.75f, 1.35f),
+                        minCorridorClearanceRadii = minOf(prev.minCorridorClearanceRadii, pendingShot.minCorridorClearanceRadii),
+                        wasCollisionAssisted = prev.wasCollisionAssisted || kissAssisted,
+                        successCount = prev.successCount + 1,
+                        lastUsedMs = pendingShot.timestampMs
+                    )
+                } else {
+                    val patId = "P${pocketIdx}_R${pendingShot.coinRowZone.coerceIn(0, 3)}C${pendingShot.coinColZone.coerceIn(0, 3)}_${angleBucket.name}_${pendingShot.timestampMs % 100_000L}"
+                    updatedPatterns.add(
+                        CleanShotPattern(
+                            patternId = patId,
+                            pocketIndex = pocketIdx,
+                            strikerNormalizedX = pendingShot.strikerNormalizedX,
+                            coinNormX = pendingShot.coinNormX,
+                            coinNormY = pendingShot.coinNormY,
+                            cutAngleDeg = pendingShot.cutAngleDeg,
+                            distRatio = pendingShot.distRatio,
+                            powerStyle = pendingShot.powerStyle,
+                            observedPullScale = pullScale,
+                            minCorridorClearanceRadii = pendingShot.minCorridorClearanceRadii,
+                            wasCollisionAssisted = kissAssisted,
+                            successCount = 1,
+                            lastUsedMs = pendingShot.timestampMs
+                        )
+                    )
+                }
+                // Any obstacle near the corridor that still resulted in a clean pot reduces risk / marks helpful kiss
+                for (obs in pendingShot.corridorObstacles) {
+                    if (obs.lateralOffsetInRadii <= 2.6f) {
+                        val alongB = (obs.alongRatio * 4f).toInt().coerceIn(0, 3)
+                        val rKey = "P${pocketIdx}_${angleBucket.name}_${obs.segment}_A$alongB"
+                        val prevRisk = updatedRisks[rKey]
+                        if (prevRisk != null) {
+                            updatedRisks[rKey] = prevRisk.copy(
+                                cleanPotDespiteNearCount = prevRisk.cleanPotDespiteNearCount + 1,
+                                lastSeenMs = pendingShot.timestampMs
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Missed or fouled shot -> save nearby corridor obstacles that likely collided/blocked
+                for (obs in pendingShot.corridorObstacles) {
+                    if (obs.lateralOffsetInRadii <= 3.1f && (obs.displacedOrKissed || obs.lateralOffsetInRadii <= 2.2f)) {
+                        val alongB = (obs.alongRatio * 4f).toInt().coerceIn(0, 3)
+                        val rKey = "P${pocketIdx}_${angleBucket.name}_${obs.segment}_A$alongB"
+                        val prevRisk = updatedRisks[rKey]
+                        if (prevRisk != null) {
+                            val n = prevRisk.foulOrMissCount.coerceAtMost(6)
+                            updatedRisks[rKey] = prevRisk.copy(
+                                blockerLateralInRadii = maxOf(prevRisk.blockerLateralInRadii, (prevRisk.blockerLateralInRadii * n + obs.lateralOffsetInRadii) / (n + 1)),
+                                foulOrMissCount = prevRisk.foulOrMissCount + 1,
+                                lastSeenMs = pendingShot.timestampMs
+                            )
+                        } else {
+                            updatedRisks[rKey] = CollisionRiskPattern(
+                                riskKey = rKey,
+                                pocketIndex = pocketIdx,
+                                angleBucket = angleBucket,
+                                corridorSegment = obs.segment,
+                                blockerAlongBucket = alongB,
+                                blockerLateralInRadii = obs.lateralOffsetInRadii,
+                                foulOrMissCount = 1,
+                                cleanPotDespiteNearCount = 0,
+                                lastSeenMs = pendingShot.timestampMs
+                            )
+                        }
+                    }
+                }
+            }
+
+            val trimmedPatterns = if (updatedPatterns.size > MAX_CLEAN_SHOT_PATTERNS) {
+                updatedPatterns
+                    .sortedWith(compareByDescending<CleanShotPattern> { it.successCount }.thenByDescending { it.lastUsedMs })
+                    .take(MAX_CLEAN_SHOT_PATTERNS)
+            } else {
+                updatedPatterns
+            }
+            val trimmedRisks = if (updatedRisks.size > MAX_COLLISION_RISKS) {
+                updatedRisks.values
+                    .sortedWith(compareByDescending<CollisionRiskPattern> { it.riskScore() }.thenByDescending { it.lastSeenMs })
+                    .take(MAX_COLLISION_RISKS)
+            } else {
+                updatedRisks.values.toList()
+            }
+
+            return memory.copy(
+                cleanShotPatterns = trimmedPatterns,
+                collisionRisks = trimmedRisks,
+                lastUpdatedMs = System.currentTimeMillis()
             )
         }
 
@@ -1000,6 +1455,8 @@ class CarromShotMemoryStore(context: Context) {
                         .put("totalAttempts", totalAttempts)
                         .put("totalPots", totalPots)
                         .put("blockedFoulSignatures", blockedFouls)
+                        .put("cleanShotPatterns", memory.cleanShotPatterns.size)
+                        .put("collisionRisks", memory.collisionRisks.size)
                 )
                 .put("carromMemory", JSONObject(serializeJson(memory)))
 

@@ -589,11 +589,13 @@ class CarromWatchTrainer {
             }
 
             val strikerNormX = ((preStrikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
+            val rawCoinNormX = ((targetCoin.center.x - board.left) / board.width).coerceIn(0f, 1f)
+            val rawCoinNormY = ((targetCoin.center.y - board.top) / board.height).coerceIn(0f, 1f)
             val movedSlider = turnInitialStrikerX != null && abs(preStrikerPos.x - turnInitialStrikerX) > 22f
             val (rawRowZone, coinColZone) = CarromMemoryData.coinZoneFor(targetCoin.center, board)
 
             // Normalize opponent's top-side perspective symmetrically into our bottom-side reference frame:
-            // Top-Left (0) <-> Bottom-Left (2), Top-Right (1) <-> Bottom-Right (3), row -> (3 - row)
+            // Top-Left (0) <-> Bottom-Left (2), Top-Right (1) <-> Bottom-Right (3), row -> (3 - row), normY -> (1 - normY)
             val normalizedPocketIdx = if (turnSide == WatchTurnSide.OPPONENT_TOP) {
                 bestPocketIdx xor 2
             } else {
@@ -603,6 +605,66 @@ class CarromWatchTrainer {
                 (3 - rawRowZone).coerceIn(0, 3)
             } else {
                 rawRowZone
+            }
+            val normalizedCoinNormY = if (turnSide == WatchTurnSide.OPPONENT_TOP) {
+                (1f - rawCoinNormY).coerceIn(0f, 1f)
+            } else {
+                rawCoinNormY
+            }
+
+            val aimedPocket = board.pockets[bestPocketIdx]
+            val dirCp = (aimedPocket - targetCoin.center).normalized()
+            val ghostBall = targetCoin.center - dirCp * (board.coinRadiusPx + board.strikerRadiusPx)
+            val distRatio = (
+                ((ghostBall - preStrikerPos).length() + (aimedPocket - targetCoin.center).length()) /
+                    board.width.coerceAtLeast(1f)
+                ).coerceIn(0.15f, 1.8f)
+
+            val inferredPullScale = observedPowerHint ?: when (powerStyle) {
+                CarromPowerStyle.SOFT -> 0.89f
+                CarromPowerStyle.MEDIUM -> 1.00f
+                CarromPowerStyle.HARD -> 1.12f
+            }
+
+            val coinR = board.coinRadiusPx.coerceAtLeast(10f)
+            val corridorObs = mutableListOf<CorridorObstacleObservation>()
+            var minClearanceRadii = 5.0f
+            for (tr in transitions) {
+                val obsCoin = tr.preCoin
+                if (abs(obsCoin.center.x - targetCoin.center.x) < 2f &&
+                    abs(obsCoin.center.y - targetCoin.center.y) < 2f
+                ) {
+                    continue
+                }
+                val wasDisplaced = tr.matchedPost == null || tr.displacementPx >= moveThreshold
+                segmentProjection(obsCoin.center, preStrikerPos, ghostBall, coinR)?.let { (along, latR) ->
+                    if (latR < minClearanceRadii) minClearanceRadii = latR
+                    if (latR <= 3.4f) {
+                        corridorObs.add(
+                            CorridorObstacleObservation(
+                                segment = "STRIKER_TO_COIN",
+                                alongRatio = along,
+                                lateralOffsetInRadii = latR,
+                                displacedOrKissed = wasDisplaced,
+                                obstacleColor = obsCoin.color
+                            )
+                        )
+                    }
+                }
+                segmentProjection(obsCoin.center, targetCoin.center, aimedPocket, coinR)?.let { (along, latR) ->
+                    if (latR < minClearanceRadii) minClearanceRadii = latR
+                    if (latR <= 3.4f) {
+                        corridorObs.add(
+                            CorridorObstacleObservation(
+                                segment = "COIN_TO_POCKET",
+                                alongRatio = along,
+                                lateralOffsetInRadii = latR,
+                                displacedOrKissed = wasDisplaced,
+                                obstacleColor = obsCoin.color
+                            )
+                        )
+                    }
+                }
             }
 
             val pending = PendingCarromShotRecord(
@@ -620,13 +682,20 @@ class CarromWatchTrainer {
                 isBreakShot = isBreakShot,
                 preCounts = preCounts,
                 isFreestyle = isFreestyle,
-                timestampMs = nowMs
+                timestampMs = nowMs,
+                coinNormX = rawCoinNormX,
+                coinNormY = normalizedCoinNormY,
+                distRatio = distRatio,
+                observedPullScale = inferredPullScale,
+                minCorridorClearanceRadii = minClearanceRadii,
+                corridorObstacles = corridorObs
             )
 
             val sidePrefix = if (turnSide == WatchTurnSide.OPPONENT_TOP) "[Opponent]" else "[You]"
             val pocketLabel = CarromMemoryData.pocketName(bestPocketIdx)
             val slideLabel = if (movedSlider) "Slider moved" else "In-place"
-            val insight = "$sidePrefix ${targetCoin.color.name} -> $pocketLabel (cut=${bestCutDeg.toInt()}°, ${powerStyle.label}, $slideLabel)"
+            val kissNote = if (corridorObs.any { it.displacedOrKissed && it.lateralOffsetInRadii <= 2.4f }) ", kiss" else ""
+            val insight = "$sidePrefix ${targetCoin.color.name} -> $pocketLabel (cut=${bestCutDeg.toInt()}°, ${powerStyle.label}, $slideLabel$kissNote)"
 
             return InferredHumanShot(
                 pendingShot = pending,
@@ -635,6 +704,24 @@ class CarromWatchTrainer {
                 humanInsightSummary = insight,
                 shooterSide = turnSide
             )
+        }
+
+        private fun segmentProjection(
+            point: Point2D,
+            start: Point2D,
+            end: Point2D,
+            coinRadiusPx: Float
+        ): Pair<Float, Float>? {
+            val dx = end.x - start.x
+            val dy = end.y - start.y
+            val lenSq = dx * dx + dy * dy
+            if (lenSq < 1f) return null
+            val t = ((point.x - start.x) * dx + (point.y - start.y) * dy) / lenSq
+            if (t < 0.04f || t > 0.96f) return null
+            val projX = start.x + dx * t
+            val projY = start.y + dy * t
+            val latRadii = hypot(point.x - projX, point.y - projY) / coinRadiusPx
+            return t to latRadii
         }
 
         private fun rayPointDistance(origin: Point2D, unitDir: Point2D, point: Point2D): Float {

@@ -61,7 +61,8 @@ object CarromVisionDetector {
         usePhysicsRollout: Boolean = true,
         useSubPixelRefinement: Boolean = true,
         isFreestyle: Boolean = false,
-        queenPendingCover: Boolean = false
+        queenPendingCover: Boolean = false,
+        isLiveStream: Boolean = false
     ): CarromVisionOutcome {
         if (screenshot == null || screenshot.width < 120 || screenshot.height < 120) {
             return CarromVisionOutcome.NeedsAiVision("No screenshot available for Carrom solver.")
@@ -90,7 +91,8 @@ object CarromVisionDetector {
         previousBoardLuma = currentLuma
 
         val effectiveMotionThreshold = if (allowStrikerRepositioning) MOTION_THRESHOLD else MOTION_THRESHOLD * 1.55f
-        if (prevLuma != null && consecutiveOfflineWaits < 6) {
+        val maxMotionWaits = if (isLiveStream) 18 else 6
+        if (prevLuma != null && consecutiveOfflineWaits < maxMotionWaits) {
             val meanDiff = computeMeanAbsDiff(prevLuma, currentLuma)
             if (meanDiff > effectiveMotionThreshold) {
                 return CarromVisionOutcome.WaitStillnessOrTurn(
@@ -211,7 +213,11 @@ object CarromVisionDetector {
                 strikerRadiusPx = strikerRadius,
                 useSubPixelRefinement = false
             )
-            val maxTurnWaitCycles = if (detectedTopStriker != null) 12 else 3
+            val maxTurnWaitCycles = if (detectedTopStriker != null) {
+                if (isLiveStream) 36 else 12
+            } else {
+                if (isLiveStream) 9 else 3
+            }
             return if (consecutiveOfflineWaits < maxTurnWaitCycles) {
                 val reason = if (detectedTopStriker != null) {
                     "Opponent striker confirmed on top baseline — waiting offline for our turn (0 API)."
