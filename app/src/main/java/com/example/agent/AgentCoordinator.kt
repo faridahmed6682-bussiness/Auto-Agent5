@@ -563,15 +563,16 @@ object AgentCoordinator {
         if (state.activePlaybook == null && state.isCarromTaskGoal) {
             val effectiveRuleAtStart = resolveCarromRuleMode(goal, initialSettings.carromRuleMode)
             val builtIn = CarromContextHelper.buildDefaultCarromPlaybook(effectiveRuleAtStart)
-            state.activePlaybook = knowledgeStore?.saveOrMergePlaybook(builtIn) ?: builtIn
-            state.workingMemory = "Loaded built-in Carrom Playbook [${state.activePlaybook.topicTitle}] (${state.activePlaybook.winningStrategies.size} tactics, ${state.activePlaybook.foulLessons.size} foul guards)."
+            val loadedPlaybook = knowledgeStore?.saveOrMergePlaybook(builtIn) ?: builtIn
+            state.activePlaybook = loadedPlaybook
+            state.workingMemory = "Loaded built-in Carrom Playbook [${loadedPlaybook.topicTitle}] (${loadedPlaybook.winningStrategies.size} tactics, ${loadedPlaybook.foulLessons.size} foul guards)."
             appendTrace(
                 state.trace,
                 AgentStepLog(
                     stepNumber = 0,
                     timestampMs = System.currentTimeMillis(),
                     actionType = AgentActionType.WAIT,
-                    targetSummary = "Playbook: ${state.activePlaybook.topicTitle}",
+                    targetSummary = "Playbook: ${loadedPlaybook.topicTitle}",
                     reason = "Loaded built-in Carrom Playbook instantly (0ms, no research stall).",
                     status = StepStatus.COMPLETED,
                     requiresConfirmation = false
@@ -597,25 +598,30 @@ object AgentCoordinator {
             }
 
             if (researched != null) {
-                state.activePlaybook = knowledgeStore?.saveOrMergePlaybook(researched) ?: researched
-                state.workingMemory = "Researched [${state.activePlaybook.topicTitle}]: ${state.activePlaybook.rulesSummary.take(160)}"
+                val researchedPlaybook = knowledgeStore?.saveOrMergePlaybook(researched) ?: researched
+                state.activePlaybook = researchedPlaybook
+                state.workingMemory = "Researched [${researchedPlaybook.topicTitle}]: ${researchedPlaybook.rulesSummary.take(160)}"
                 appendTrace(
                     state.trace,
                     AgentStepLog(
                         stepNumber = 0,
                         timestampMs = System.currentTimeMillis(),
                         actionType = AgentActionType.WAIT,
-                        targetSummary = "Playbook: ${state.activePlaybook.topicTitle}",
-                        reason = "Researched ${state.activePlaybook.winningStrategies.size} strategies & ${state.activePlaybook.foulLessons.size} foul guards.",
+                        targetSummary = "Playbook: ${researchedPlaybook.topicTitle}",
+                        reason = "Researched ${researchedPlaybook.winningStrategies.size} strategies & ${researchedPlaybook.foulLessons.size} foul guards.",
                         status = StepStatus.COMPLETED,
                         requiresConfirmation = false
                     )
                 )
             }
         } else if (state.activePlaybook != null) {
-            knowledgeStore?.incrementTrainingSession(state.activePlaybook.topicKey)
-            state.activePlaybook = knowledgeStore?.findMatchingPlaybook(goal) ?: state.activePlaybook
-            state.workingMemory = "Loaded trained playbook [${state.activePlaybook.topicTitle}] (${state.activePlaybook.winningStrategies.size} tactics, ${state.activePlaybook.foulLessons.size} foul guards)."
+            val existingPlaybook = state.activePlaybook
+            if (existingPlaybook != null) {
+                knowledgeStore?.incrementTrainingSession(existingPlaybook.topicKey)
+                val refreshedPlaybook = knowledgeStore?.findMatchingPlaybook(goal) ?: existingPlaybook
+                state.activePlaybook = refreshedPlaybook
+                state.workingMemory = "Loaded trained playbook [${refreshedPlaybook.topicTitle}] (${refreshedPlaybook.winningStrategies.size} tactics, ${refreshedPlaybook.foulLessons.size} foul guards)."
+            }
         }
 
         var launchedCarromDirectly = false
@@ -1195,9 +1201,10 @@ object AgentCoordinator {
         }
 
         // Latch the updated transcript signature once our own just-sent bubble renders on screen
+        val pendingSentText = state.pendingSentTextForPeer
         if (activeAwaitingReply != null &&
-            state.pendingSentTextForPeer != null &&
-            state.pendingSentTextForPeer.first == activePeerKey &&
+            pendingSentText != null &&
+            pendingSentText.first == activePeerKey &&
             chatObs.inChatThread
         ) {
             val latched = activeAwaitingReply.copy(transcriptSignatureAtSend = chatObs.transcriptSignature)
@@ -1337,7 +1344,7 @@ object AgentCoordinator {
                 alreadyOpenedDrawer = state.launcherOpenedDrawer,
                 alreadyTappedSearch = state.launcherTappedSearch,
                 alreadyTypedSearch = state.launcherTypedSearch,
-                targetAppOverride = targetAppOverride
+                targetAppOverride = obs.targetAppOverride
             )
         } else {
             null
@@ -1494,7 +1501,7 @@ object AgentCoordinator {
     // Fresh-rack detection, previous-shot outcome evaluation (power /
     // deflection / scratch learning), and the queen-cover check.
     // (Formerly the block before `when (outcome)` in the Carrom branch.)
-    private fun evaluatePreviousCarromShot(
+    private suspend fun evaluatePreviousCarromShot(
         state: TaskRunState,
         obs: StepObservation,
         outcome: CarromVisionOutcome,
@@ -1797,7 +1804,7 @@ object AgentCoordinator {
     // and (when needed) the slider-probe drag. Returns the slide action
     // or the context the fire phase needs. (Formerly the first half of
     // the SolvedShot branch.)
-    private fun probeCarromShot(
+    private suspend fun probeCarromShot(
         state: TaskRunState,
         obs: StepObservation,
         analysis: StepAnalysis,
@@ -2622,6 +2629,7 @@ object AgentCoordinator {
             }
             else -> rawAction
         }
+        return plannedAction
     }
     // Execute one planned action and do the post-execution bookkeeping
     // (memory, checklist, cache trail, Carrom shot registration).
