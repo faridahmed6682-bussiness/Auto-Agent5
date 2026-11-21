@@ -1458,7 +1458,7 @@ class AgentLogicUnitTest {
         val t0 = 10_000L
 
         assertEquals(5_000L, com.example.game.CarromTurnMemory.MAX_TURN_BUDGET_MS)
-        assertEquals(3_850L, com.example.game.CarromTurnMemory.FALLBACK_FIRE_ELAPSED_MS)
+        assertEquals(3_400L, com.example.game.CarromTurnMemory.FALLBACK_FIRE_ELAPSED_MS)
         assertEquals(2, com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES)
 
         val coin1Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(300f, 700f), 28f)
@@ -1473,9 +1473,11 @@ class AgentLogicUnitTest {
         // Frame 2 (after slide #1): slight jitter on coin1, slider gain refined
         val coin1Frame2 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(304f, 698f), 28f)
         tm.recordObservation(t0 + 1_200L, listOf(coin1Frame2, coin2Frame1), striker1.copy(center = com.example.game.Point2D(250f, 1320f)), com.example.game.Point2D(250f, 1600f), null, 0.92f)
-        assertTrue(tm.canAffordAnotherSliderMove(t0 + 3_500L, isLiveStreamActive = true))
+        assertTrue(tm.canAffordAnotherSliderMove(t0 + 3_000L, isLiveStreamActive = true))
+        // Probe cutoff is 3.4s: no more slider moves at/after 3.4s, so the shot can still fire by 4.5s/5.0s
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 3_500L, isLiveStreamActive = true))
 
-        // Cut off at 3.9s (live) and 3.8s (non-live reserve 1.25s) to guarantee firing within 5.0s
+        // Past the 3.4s probe cutoff (live and non-live alike) — no more slides, must fire within 5.0s
         assertFalse(tm.canAffordAnotherSliderMove(t0 + 3_900L, isLiveStreamActive = true))
         assertFalse(tm.canAffordAnotherSliderMove(t0 + 3_800L, isLiveStreamActive = false))
 
