@@ -176,6 +176,42 @@ object WhatsAppBridgeRepository {
         }
     }
 
+    suspend fun sleepSession(
+        serverUrl: String,
+        bridgeSecret: String,
+        userId: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeServerUrl(serverUrl)
+            ?: return@withContext Result.failure(IllegalArgumentException("Invalid Server URL."))
+        val cleanId = userId.trim()
+        if (!isValidUserId(cleanId)) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid User ID."))
+        }
+        runCatching {
+            val payload = JSONObject().put("userId", cleanId).toString()
+            executePost("$baseUrl/api/whatsapp/sleep", bridgeSecret, payload)
+            Unit
+        }
+    }
+
+    suspend fun resumeSession(
+        serverUrl: String,
+        bridgeSecret: String,
+        userId: String
+    ): Result<WhatsAppConnectionStatus> = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeServerUrl(serverUrl)
+            ?: return@withContext Result.failure(IllegalArgumentException("Invalid Server URL."))
+        val cleanId = userId.trim()
+        if (!isValidUserId(cleanId)) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid User ID."))
+        }
+        runCatching {
+            val payload = JSONObject().put("userId", cleanId).toString()
+            val body = executePost("$baseUrl/api/whatsapp/resume", bridgeSecret, payload)
+            WhatsAppConnectionStatus.fromApi(JSONObject(body).optString("status"))
+        }
+    }
+
     private fun executeGet(url: String, bridgeSecret: String): String {
         val builder = Request.Builder().url(url).get()
         if (bridgeSecret.isNotBlank()) {

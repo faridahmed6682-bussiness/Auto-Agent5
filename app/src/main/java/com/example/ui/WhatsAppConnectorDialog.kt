@@ -104,6 +104,8 @@ fun WhatsAppConnectorDialog(
     onRequestPairingCode: (serverUrl: String, bridgeSecret: String, userId: String, phoneNumber: String) -> Unit,
     onCheckStatus: () -> Unit,
     onSyncRules: (autoReplyEnabled: Boolean, aiReplyInstruction: String) -> Unit,
+    onPauseSleep: () -> Unit = {},
+    onResume: () -> Unit = {},
     onDisconnect: () -> Unit,
     onDismissBanner: () -> Unit,
     onDismiss: () -> Unit
@@ -128,6 +130,7 @@ fun WhatsAppConnectorDialog(
 
     val isConnected = config.status == WhatsAppConnectionStatus.CONNECTED
     val isPairing = config.status == WhatsAppConnectionStatus.PAIRING
+    val isPaused = config.status == WhatsAppConnectionStatus.PAUSED
     val enabledWaContactCount = contacts.count { it.autoReplyEnabled }
 
     Dialog(
@@ -193,17 +196,17 @@ fun WhatsAppConnectorDialog(
                 // Live Connection Badge Card
                 val badgeBg = when (config.status) {
                     WhatsAppConnectionStatus.CONNECTED -> CyberTealDark
-                    WhatsAppConnectionStatus.PAIRING -> AmberContainer
+                    WhatsAppConnectionStatus.PAIRING, WhatsAppConnectionStatus.PAUSED -> AmberContainer
                     WhatsAppConnectionStatus.DISCONNECTED -> SlateSurface
                 }
                 val badgeBorder = when (config.status) {
                     WhatsAppConnectionStatus.CONNECTED -> CyberTeal
-                    WhatsAppConnectionStatus.PAIRING -> AmberWarning
+                    WhatsAppConnectionStatus.PAIRING, WhatsAppConnectionStatus.PAUSED -> AmberWarning
                     WhatsAppConnectionStatus.DISCONNECTED -> SlateBorder
                 }
                 val badgeTextColor = when (config.status) {
                     WhatsAppConnectionStatus.CONNECTED -> CyberTeal
-                    WhatsAppConnectionStatus.PAIRING -> AmberWarning
+                    WhatsAppConnectionStatus.PAIRING, WhatsAppConnectionStatus.PAUSED -> AmberWarning
                     WhatsAppConnectionStatus.DISCONNECTED -> TextSecondary
                 }
                 Card(
@@ -228,6 +231,7 @@ fun WhatsAppConnectorDialog(
                             )
                             val subtitle = when {
                                 isConnected -> "Linked: ${config.connectedPhone.ifBlank { config.phoneNumber }} • Replies sent: ${config.totalRepliesSent}"
+                                isPaused -> "Server sleeping to save credit • Saved login preserved"
                                 isPairing -> "Waiting for confirmation on your phone..."
                                 else -> "Enter server URL & WhatsApp number to pair"
                             }
@@ -398,7 +402,7 @@ fun WhatsAppConnectorDialog(
                                 Text("Get Pairing Code", fontWeight = FontWeight.Bold)
                             }
 
-                            if (isConnected || isPairing) {
+                            if (isConnected || isPairing || isPaused) {
                                 OutlinedButton(
                                     onClick = onDisconnect,
                                     enabled = !isBusy,
@@ -415,8 +419,29 @@ fun WhatsAppConnectorDialog(
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Disconnect", color = CrimsonStop)
+                                    Text("Unlink", color = CrimsonStop)
                                 }
+                            }
+                        }
+
+                        if (isConnected || isPaused) {
+                            Button(
+                                onClick = { if (isPaused) onResume() else onPauseSleep() },
+                                enabled = !isBusy,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("btn_wa_sleep_resume"),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isPaused) CyberTeal else AmberContainer,
+                                    contentColor = if (isPaused) ObsidianBg else AmberWarning
+                                )
+                            ) {
+                                Text(
+                                    text = if (isPaused) "Wake & Resume Bot ⚡" else "Pause Bot (Sleep & Save Credit 💤)",
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }

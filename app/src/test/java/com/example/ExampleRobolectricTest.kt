@@ -1865,6 +1865,10 @@ class ExampleRobolectricTest {
         assertEquals("https://wa-bot.example.com", decoded.serverUrl)
         assertEquals("8801712345678", decoded.phoneNumber)
         assertEquals(com.example.whatsapp.WhatsAppConnectionStatus.CONNECTED, decoded.status)
+        assertEquals(
+            com.example.whatsapp.WhatsAppConnectionStatus.PAUSED,
+            com.example.whatsapp.WhatsAppConnectionStatus.fromApi("paused")
+        )
         assertEquals(12, decoded.totalRepliesSent)
         assertEquals(1, decoded.logs.size)
         assertEquals("Connected ✅", decoded.logs[0].title)

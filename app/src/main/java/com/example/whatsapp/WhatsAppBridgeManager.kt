@@ -251,6 +251,57 @@ object WhatsAppBridgeManager {
         }
     }
 
+    fun pauseSleepSession() {
+        val cfg = _config.value
+        pollingJob?.cancel()
+        if (cfg.serverUrl.isBlank()) return
+        scope.launch {
+            _isBusy.value = true
+            val res = WhatsAppBridgeRepository.sleepSession(cfg.serverUrl, cfg.bridgeSecret, cfg.userId)
+            res.onSuccess {
+                updateAndSave { cur ->
+                    prependLog(
+                        cur.copy(status = WhatsAppConnectionStatus.PAUSED),
+                        title = "Bot Paused (Sleep 💤)",
+                        detail = "Socket closed without unlinking. Railway sleeps after 5-10m to save credit."
+                    )
+                }
+                _statusBanner.value = "Bot Paused 💤 — Login saved! Server will now sleep to save credits."
+            }.onFailure { err ->
+                _statusBanner.value = err.localizedMessage ?: "Failed to pause bot."
+            }
+            _isBusy.value = false
+        }
+    }
+
+    fun resumeSession() {
+        val cfg = _config.value
+        if (cfg.serverUrl.isBlank()) return
+        scope.launch {
+            _isBusy.value = true
+            _statusBanner.value = "Waking server & reconnecting WhatsApp..."
+            val res = WhatsAppBridgeRepository.resumeSession(cfg.serverUrl, cfg.bridgeSecret, cfg.userId)
+            res.onSuccess { st ->
+                updateAndSave { cur ->
+                    prependLog(
+                        cur.copy(status = if (st == WhatsAppConnectionStatus.CONNECTED) WhatsAppConnectionStatus.CONNECTED else WhatsAppConnectionStatus.PAIRING),
+                        title = "Bot Resumed ⚡",
+                        detail = "Reconnected automatically from saved session."
+                    )
+                }
+                if (st == WhatsAppConnectionStatus.CONNECTED) {
+                    _statusBanner.value = "Connected ✅ — Auto-Reply active!"
+                } else {
+                    startPairingPollLoop()
+                    _statusBanner.value = "Reconnecting saved session..."
+                }
+            }.onFailure { err ->
+                _statusBanner.value = err.localizedMessage ?: "Failed to resume bot."
+            }
+            _isBusy.value = false
+        }
+    }
+
     private fun startPairingPollLoop() {
         pollingJob?.cancel()
         pollingJob = scope.launch {

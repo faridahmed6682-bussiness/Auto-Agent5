@@ -6,12 +6,14 @@ import org.json.JSONObject
 enum class WhatsAppConnectionStatus(val label: String) {
     DISCONNECTED("Disconnected"),
     PAIRING("Pairing..."),
+    PAUSED("Paused (Sleep 💤)"),
     CONNECTED("Connected ✅");
 
     companion object {
         fun fromApi(raw: String?): WhatsAppConnectionStatus = when (raw?.trim()?.lowercase()) {
             "connected" -> CONNECTED
             "pairing" -> PAIRING
+            "paused" -> PAUSED
             else -> DISCONNECTED
         }
     }

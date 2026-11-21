@@ -23,7 +23,13 @@ const agentTools = require('./services/agentTools');
 const PORT = Number(process.env.PORT || 3000);
 const BRIDGE_SECRET = (process.env.BRIDGE_SECRET || '').trim();
 const ALLOWED_ORIGIN = (process.env.ALLOWED_ORIGIN || '').trim();
-const SESSIONS_ROOT = path.resolve(__dirname, 'sessions');
+const rawStorageDir = (
+    process.env.STORAGE_DIR ||
+    process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+    ''
+).trim();
+const STORAGE_ROOT = rawStorageDir ? path.resolve(rawStorageDir) : __dirname;
+const SESSIONS_ROOT = path.resolve(STORAGE_ROOT, 'sessions');
 fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
 
 const app = express();
@@ -258,7 +264,10 @@ async function createBaileysSession(userId, phoneNumberDigits = '') {
             const loggedOut = statusCode === DisconnectReason.loggedOut;
             console.log(`[WhatsApp][${userId}] Closed (code=${statusCode}, loggedOut=${loggedOut})`);
 
-            if (loggedOut) {
+            if (sessionRecord.pausedByUser) {
+                sessionRecord.status = 'paused';
+                clearTimeout(sessionRecord.reconnectTimer);
+            } else if (loggedOut) {
                 sessionRecord.status = 'disconnected';
                 sessionRecord.pairingCode = '';
                 fs.rmSync(sessionDir, { recursive: true, force: true });
@@ -636,10 +645,22 @@ app.get('/api/whatsapp/status/:userId', verifyBridgeSecret, (req, res) => {
     }
     const record = sessions.get(userId);
     const cfg = getOrDefaultConfig(userId);
+    let effectiveStatus = record?.status || 'disconnected';
+    let phone = record?.phoneNumber || '';
+
+    if (!record) {
+        const savedWa = connectorsStore.getConnectorWithCredentials(userId, 'whatsapp');
+        const hasCreds = fs.existsSync(path.join(getSessionDir(userId), 'creds.json'));
+        if (hasCreds && savedWa?.automation_rules?.whatsappPaused) {
+            effectiveStatus = 'paused';
+            phone = savedWa?.scopes_or_meta?.phoneNumber || '';
+        }
+    }
+
     return res.json({
         userId,
-        status: record?.status || 'disconnected',
-        phoneNumber: record?.phoneNumber || '',
+        status: effectiveStatus,
+        phoneNumber: phone,
         autoReplyEnabled: cfg.autoReplyEnabled,
         totalRepliesSent: cfg.totalRepliesSent,
         recentReplies: cfg.recentReplies
@@ -692,7 +713,56 @@ app.post('/api/whatsapp/disconnect', verifyBridgeSecret, async (req, res) => {
     return res.json({ ok: true, status: 'disconnected' });
 });
 
-app.listen(PORT, () => {
+// POST /api/whatsapp/sleep -> Closes socket WITHOUT logging out so Railway Free can sleep & save credits
+app.post('/api/whatsapp/sleep', verifyBridgeSecret, (req, res) => {
+    const userId = sanitizeUserId(req.body?.userId || 'tappilot_main');
+    if (!userId) return res.status(400).json({ error: 'Invalid userId.' });
+
+    const record = sessions.get(userId);
+    if (record) {
+        record.pausedByUser = true;
+        record.status = 'paused';
+        clearTimeout(record.reconnectTimer);
+        try { record.sock?.end(undefined); } catch (_) {}
+        sessions.delete(userId);
+    }
+    connectorsStore.updateAutomationRules(userId, 'whatsapp', { whatsappPaused: true });
+    return res.json({
+        ok: true,
+        status: 'paused',
+        message: 'WhatsApp Bot paused cleanly. Saved session kept — Railway will now sleep to save credits!'
+    });
+});
+
+// POST /api/whatsapp/resume -> Wakes server and reconnects WhatsApp using saved creds without re-pairing
+app.post('/api/whatsapp/resume', verifyBridgeSecret, async (req, res) => {
+    const userId = sanitizeUserId(req.body?.userId || 'tappilot_main');
+    if (!userId) return res.status(400).json({ error: 'Invalid userId.' });
+
+    const credsFile = path.join(getSessionDir(userId), 'creds.json');
+    if (!fs.existsSync(credsFile)) {
+        return res.status(400).json({ error: 'No saved WhatsApp session found. Please pair with your number once.' });
+    }
+    connectorsStore.updateAutomationRules(userId, 'whatsapp', { whatsappPaused: false });
+    const record = await createBaileysSession(userId, '');
+    record.pausedByUser = false;
+    return res.json({
+        ok: true,
+        status: record.status,
+        phoneNumber: record.phoneNumber || '',
+        message: 'WhatsApp Bot resumed from saved session!'
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        ok: true,
+        status: 'up',
+        storageDir: STORAGE_ROOT
+    });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`TapPilot Unified Connector & WhatsApp Baileys Server running on port ${PORT}`);
     if (!BRIDGE_SECRET) {
         console.log('Tip: Set BRIDGE_SECRET env var in production to protect API endpoints.');

@@ -4,7 +4,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DATA_DIR = path.resolve(__dirname, '..', 'data');
+const rawStorageDir = (
+    process.env.STORAGE_DIR ||
+    process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+    ''
+).trim();
+const DATA_DIR = rawStorageDir
+    ? path.resolve(rawStorageDir, 'data')
+    : path.resolve(__dirname, '..', 'data');
 const DB_FILE = path.resolve(DATA_DIR, 'connectors.db.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });

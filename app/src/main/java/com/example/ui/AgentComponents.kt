@@ -1023,10 +1023,11 @@ fun WhatsAppConnectorQuickCard(
 ) {
     val isConnected = waConfig.status == com.example.whatsapp.WhatsAppConnectionStatus.CONNECTED
     val isPairing = waConfig.status == com.example.whatsapp.WhatsAppConnectionStatus.PAIRING
+    val isPaused = waConfig.status == com.example.whatsapp.WhatsAppConnectionStatus.PAUSED
     val activeBorderColor by animateColorAsState(
         targetValue = when {
             isConnected -> CyberTeal
-            isPairing -> AmberWarning
+            isPairing || isPaused -> AmberWarning
             else -> SlateBorder
         },
         animationSpec = tween(260),
@@ -1063,7 +1064,7 @@ fun WhatsAppConnectorQuickCard(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
-                if (isConnected || isPairing) {
+                if (isConnected || isPairing || isPaused) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -1076,7 +1077,11 @@ fun WhatsAppConnectorQuickCard(
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = if (isConnected) "CONNECTED ✅" else "PAIRING...",
+                            text = when {
+                                isConnected -> "CONNECTED ✅"
+                                isPaused -> "SLEEP 💤"
+                                else -> "PAIRING..."
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = if (isConnected) CyberTeal else AmberWarning,
                             fontWeight = FontWeight.Bold
@@ -1088,6 +1093,7 @@ fun WhatsAppConnectorQuickCard(
             Text(
                 text = when {
                     isConnected -> "Linked: ${waConfig.connectedPhone.ifBlank { waConfig.phoneNumber }} • Replies sent: ${waConfig.totalRepliesSent}"
+                    isPaused -> "Sleeping to save Railway credit • Tap Hub to Wake & Resume"
                     isPairing && waConfig.pairingCode.isNotBlank() -> "Pairing Code: ${waConfig.pairingCode} (Tap Hub to copy)"
                     else -> stringResource(R.string.wa_hub_desc)
                 },

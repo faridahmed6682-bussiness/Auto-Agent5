@@ -593,6 +593,8 @@ fun DashboardScreen(viewModel: AgentViewModel) {
             onRequestPairingCode = viewModel::waRequestPairingCode,
             onCheckStatus = viewModel::waCheckStatus,
             onSyncRules = viewModel::waSyncRules,
+            onPauseSleep = viewModel::waPauseSleep,
+            onResume = viewModel::waResume,
             onDisconnect = viewModel::waDisconnect,
             onDismissBanner = viewModel::waDismissBanner,
             onDismiss = { showWhatsAppHubDialog = false }

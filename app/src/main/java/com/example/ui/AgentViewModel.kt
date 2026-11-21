@@ -304,6 +304,8 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun waDisconnect() = com.example.whatsapp.WhatsAppBridgeManager.disconnectSession()
+    fun waPauseSleep() = com.example.whatsapp.WhatsAppBridgeManager.pauseSleepSession()
+    fun waResume() = com.example.whatsapp.WhatsAppBridgeManager.resumeSession()
     fun waDismissBanner() = com.example.whatsapp.WhatsAppBridgeManager.dismissBanner()
 
     fun unifiedSaveServer(serverUrl: String, secret: String, userId: String) =
