@@ -121,6 +121,20 @@ object CarromVisionDetector {
         val boardBmWidth = (boardBmRight - boardBmLeft).coerceAtLeast(40)
         val boardBmHeight = (boardBmBottom - boardBmTop).coerceAtLeast(40)
 
+        // Measure the real baseline line from the board print (see
+        // detectBaselineLineY): the printed line sits at 0.805f on some
+        // boards, not the 0.845f default — anchoring the striker to the
+        // default puts it ~26 screen px too low and fails the A07
+        // baseline test. An explicit calibration still wins; the measured
+        // line only replaces the default.
+        val measuredBaselineFraction = detectBaselineLineY(
+            bitmap = screenshot,
+            boardLeft = boardBmLeft,
+            boardTop = boardBmTop,
+            boardRight = boardBmRight,
+            boardBottom = boardBmBottom
+        )?.let { ((it - boardBmTop) / boardBmHeight.toFloat()).coerceIn(0.62f, 0.95f) }
+
         // 1. Offline Motion / Stillness check on central playfield [0.16..0.76] (ignores pulsing baseline striker halo)
         val innerPadX = (boardBmWidth * 0.12f).toInt()
         val motionTop = (boardBmTop + (boardBmHeight * 0.16f).toInt()).coerceIn(0, screenshot.height - 2)
@@ -151,7 +165,7 @@ object CarromVisionDetector {
             }
         }
 
-        val baselineFraction = activeCal?.baselineYNorm ?: 0.845f
+        val baselineFraction = activeCal?.baselineYNorm ?: measuredBaselineFraction ?: 0.845f
 
         // 1b. Turn-glow centre (cheap, skin-independent): the green halo
         // around the bottom striker. Computed early so the knob decision
@@ -657,6 +671,17 @@ object CarromVisionDetector {
         val boardBmWidth = (boardBmRight - boardBmLeft).coerceAtLeast(40)
         val boardBmHeight = (boardBmBottom - boardBmTop).coerceAtLeast(40)
 
+        // Measure the real baseline line from the board print (same as
+        // analyzeAndSolve): an explicit calibration still wins; the
+        // measured line only replaces the 0.845f default.
+        val measuredBaselineFraction = detectBaselineLineY(
+            bitmap = screenshot,
+            boardLeft = boardBmLeft,
+            boardTop = boardBmTop,
+            boardRight = boardBmRight,
+            boardBottom = boardBmBottom
+        )?.let { ((it - boardBmTop) / boardBmHeight.toFloat()).coerceIn(0.62f, 0.95f) }
+
         val innerPadX = (boardBmWidth * 0.12f).toInt()
         val motionTop = (boardBmTop + (boardBmHeight * 0.16f).toInt()).coerceIn(0, screenshot.height - 2)
         val motionBottom = (boardBmTop + (boardBmHeight * 0.76f).toInt()).coerceIn(motionTop + 1, screenshot.height - 1)
@@ -672,7 +697,7 @@ object CarromVisionDetector {
         val meanDiff = if (prevLuma != null) computeMeanAbsDiff(prevLuma, currentLuma) else 0f
         val isInMotion = prevLuma != null && meanDiff > (MOTION_THRESHOLD * 0.90f)
 
-        val baselineFraction = activeCal?.baselineYNorm ?: 0.845f
+        val baselineFraction = activeCal?.baselineYNorm ?: measuredBaselineFraction ?: 0.845f
 
         // Turn-glow centre, computed early (same as analyzeAndSolve): the
         // knob decision and the striker anchor use it as a cross-check.
@@ -975,6 +1000,81 @@ object CarromVisionDetector {
         val finalTop = if (bestScore > defaultScore + 8f && bestScore > 16f) bestTop else defaultTop
         val finalBottom = (finalTop + boardW).coerceAtMost(h - 1)
         return BoardBmBounds(left = left, top = finalTop, right = right, bottom = finalBottom)
+    }
+
+    /**
+     * Measure the board's real bottom-baseline Y from the printed dark
+     * horizontal baseline line (with its two end circles), instead of
+     * assuming the 0.845f default. The line is the longest dark run in
+     * the lower board band (0.70..0.92 of board height); a coin row can
+     * only make a ~1-disc run, and the small cyan deco spot some boards
+     * paint near 0.845f is far too short to win. Returns the line centre
+     * in bitmap pixels, or null when no convincing line is found (the
+     * caller then keeps the default). A decorated striker sitting on the
+     * line does not break it: the disc is dark too, only its light
+     * centre interrupts the run, and both halves still clear the bar.
+     */
+    private fun detectBaselineLineY(
+        bitmap: Bitmap,
+        boardLeft: Int,
+        boardTop: Int,
+        boardRight: Int,
+        boardBottom: Int
+    ): Float? {
+        val bw = (boardRight - boardLeft).coerceAtLeast(40)
+        val bh = (boardBottom - boardTop).coerceAtLeast(40)
+        val (woodR, woodG, woodB) = estimateBoardWoodRgb(bitmap, boardLeft, boardTop, boardRight, boardBottom)
+        val woodLuma = (woodR * 30 + woodG * 59 + woodB * 11) / 100
+        val scanLeft = (boardLeft + (bw * 0.14f).toInt()).coerceIn(0, bitmap.width - 2)
+        val scanRight = (boardLeft + (bw * 0.86f).toInt()).coerceIn(scanLeft + 2, bitmap.width - 1)
+        val scanTop = (boardTop + (bh * 0.70f).toInt()).coerceIn(0, bitmap.height - 2)
+        val scanBottom = (boardTop + (bh * 0.92f).toInt()).coerceIn(scanTop + 2, bitmap.height - 1)
+        val minRun = ((scanRight - scanLeft) * 0.30f).toInt().coerceAtLeast(20)
+
+        fun longestDarkRun(py: Int): Int {
+            var best = 0
+            var run = 0
+            var px = scanLeft
+            while (px <= scanRight) {
+                val p = bitmap.getPixel(px, py)
+                val diff = abs(Color.red(p) - woodR) + abs(Color.green(p) - woodG) + abs(Color.blue(p) - woodB)
+                val luma = (Color.red(p) * 30 + Color.green(p) * 59 + Color.blue(p) * 11) / 100
+                if (diff >= 56 && luma < woodLuma) run++ else {
+                    if (run > best) best = run
+                    run = 0
+                }
+                px++
+            }
+            if (run > best) best = run
+            return best
+        }
+
+        var bestRun = 0
+        var bestY = -1
+        var y = scanTop
+        while (y <= scanBottom) {
+            val run = longestDarkRun(y)
+            if (run > bestRun) {
+                bestRun = run
+                bestY = y
+            }
+            y++
+        }
+        if (bestY < 0 || bestRun < minRun) return null
+        // The printed line is a few px tall: average every row whose dark
+        // run is almost as long as the best row, so the centre is the
+        // line's middle rather than its top or bottom edge.
+        var sumY = 0f
+        var count = 0
+        y = scanTop
+        while (y <= scanBottom) {
+            if (longestDarkRun(y) >= (bestRun * 0.75f).toInt().coerceAtLeast(minRun)) {
+                sumY += y.toFloat()
+                count++
+            }
+            y++
+        }
+        return if (count > 0) sumY / count else bestY.toFloat()
     }
 
     private fun detectBottomSliderKnob(
