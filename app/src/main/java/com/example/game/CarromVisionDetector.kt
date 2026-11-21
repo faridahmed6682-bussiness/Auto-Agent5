@@ -8,7 +8,11 @@ import kotlin.math.abs
 sealed interface CarromVisionOutcome {
     data class WaitStillnessOrTurn(
         val reason: String,
-        val boardPieces: List<CarromPiece> = emptyList()
+        val boardPieces: List<CarromPiece> = emptyList(),
+        // True when the "your turn" glow halo was visible on this frame:
+        // the coordinator anchors the 5s turn clock on it, even on a
+        // wait cycle, so pre-solve waits stop eating the whole window.
+        val turnGlowDetected: Boolean = false
     ) : CarromVisionOutcome
     data class SolvedShot(
         val solution: CarromShotSolution,
@@ -21,7 +25,12 @@ sealed interface CarromVisionOutcome {
     ) : CarromVisionOutcome
     data class NeedsAiVision(
         val diagnostic: String,
-        val boardPieces: List<CarromPiece> = emptyList()
+        val boardPieces: List<CarromPiece> = emptyList(),
+        // True when the "your turn" glow halo was visible on this frame:
+        // the turn HAS started even though no offline shot was found, so
+        // the coordinator anchors the 5s clock on it instead of waiting
+        // for the first solved shot.
+        val turnGlowDetected: Boolean = false
     ) : CarromVisionOutcome
 }
 
@@ -135,6 +144,30 @@ object CarromVisionDetector {
             boardBottom = boardBmBottom
         )?.let { ((it - boardBmTop) / boardBmHeight.toFloat()).coerceIn(0.62f, 0.95f) }
 
+        val baselineFraction = activeCal?.baselineYNorm ?: measuredBaselineFraction ?: 0.845f
+
+        // 1b. Turn-glow centre FIRST (cheap, skin-independent): the green
+        // halo around the bottom striker. It proves it is OUR turn, so the
+        // motion gate below must not burn the 5s window waiting for a
+        // "still" board — the glow's own pulsing is what keeps the luma
+        // grid changing. Computed first so the motion gate, the knob
+        // decision and the striker anchor can all use it as a cross-check.
+        val glowCenter = detectBottomTurnGlowCenter(
+            bitmap = screenshot,
+            boardLeft = boardBmLeft,
+            boardTop = boardBmTop,
+            boardRight = boardBmRight,
+            boardBottom = boardBmBottom,
+            baselineFraction = baselineFraction
+        )
+        val glowX = glowCenter.center?.x
+        // Function-level turn flag: true whenever the glow is visible.
+        // The fallback branch below tightens it (glow + no opponent
+        // striker); the SolvedShot/NeedsAiVision outcomes report it so
+        // the coordinator can anchor the 5s turn clock at the first
+        // glow sighting instead of the first solved shot.
+        var turnBannerDetected = glowCenter.detected
+
         // 1. Offline Motion / Stillness check on central playfield [0.16..0.76] (ignores pulsing baseline striker halo)
         val innerPadX = (boardBmWidth * 0.12f).toInt()
         val motionTop = (boardBmTop + (boardBmHeight * 0.16f).toInt()).coerceIn(0, screenshot.height - 2)
@@ -151,7 +184,7 @@ object CarromVisionDetector {
 
         val effectiveMotionThreshold = if (allowStrikerRepositioning) MOTION_THRESHOLD else MOTION_THRESHOLD * 1.55f
         val maxMotionWaits = if (isLiveStream) 4 else 2
-        if (!isTurnActive && prevLuma != null && consecutiveOfflineWaits < maxMotionWaits) {
+        if (!isTurnActive && !turnBannerDetected && prevLuma != null && consecutiveOfflineWaits < maxMotionWaits) {
             val meanDiff = computeMeanAbsDiff(prevLuma, currentLuma)
             // Settled-board fast path: the promoted pieces were stable
             // across the last two frames, so the board is still — the luma
@@ -160,25 +193,14 @@ object CarromVisionDetector {
             // grid to quiet down.
             if (meanDiff > effectiveMotionThreshold && settledFrameCount < 1) {
                 return CarromVisionOutcome.WaitStillnessOrTurn(
-                    "Board motion detected (diff=${meanDiff.toInt()}) — waiting offline for coins to settle (0 API)."
+                    "Board motion detected (diff=${meanDiff.toInt()}) — waiting offline for coins to settle (0 API).",
+                    turnGlowDetected = turnBannerDetected
                 )
             }
         }
 
-        val baselineFraction = activeCal?.baselineYNorm ?: measuredBaselineFraction ?: 0.845f
-
-        // 1b. Turn-glow centre (cheap, skin-independent): the green halo
-        // around the bottom striker. Computed early so the knob decision
-        // and the striker anchor can use it as a cross-check.
-        val glowCenter = detectBottomTurnGlowCenter(
-            bitmap = screenshot,
-            boardLeft = boardBmLeft,
-            boardTop = boardBmTop,
-            boardRight = boardBmRight,
-            boardBottom = boardBmBottom,
-            baselineFraction = baselineFraction
-        )
-        val glowX = glowCenter.center?.x
+        // (baselineFraction + glow already computed above, before the
+        // motion gate, so the gate can skip when the turn glow is on.)
 
         // 2. Detect bottom slider knob (uses calibrated slider track band if enabled)
         val sliderKnobPx = detectBottomSliderKnob(
@@ -244,11 +266,19 @@ object CarromVisionDetector {
                 ?.takeIf { p -> abs(p.center.x - refX) <= boardWidthPx * 0.06f }
                 ?.center?.x
         }
+        // Tap-to-teach anchor (Striker Finder): the user tapped the real
+        // striker once on this board profile; stored as a board-relative
+        // norm so it survives screen-size changes. It only VOTES (see
+        // resolveStrikerAnchorX) — it never overrides live knob/glow.
+        val taughtStrikerX = activeCal?.taughtStrikerXNorm?.let { tx ->
+            boardLeft + tx * boardWidthPx
+        }
         val anchorX = resolveStrikerAnchorX(
             sliderKnobPx = sliderKnobPx,
             glowCenterX = glowX,
             appearanceX = appearanceVoteX,
-            boardWidthPx = boardWidthPx
+            boardWidthPx = boardWidthPx,
+            taughtX = taughtStrikerX
         )
 
         // 4b. Color-agnostic bottom baseline striker detection (matches ANY striker color/skin/halo)
@@ -326,7 +356,8 @@ object CarromVisionDetector {
         if (promoted.isEmpty()) {
             return CarromVisionOutcome.NeedsAiVision(
                 diagnostic = "Detected 0 Carrom pieces (slider=${sliderKnobPx != null}); delegating to AI Vision.",
-                boardPieces = promoted
+                boardPieces = promoted,
+                turnGlowDetected = turnBannerDetected
             )
         }
 
@@ -354,7 +385,6 @@ object CarromVisionDetector {
         // turn never started. After the wait budget, assume it IS our turn and
         // play from the baseline centre instead of sitting still.
         var fallbackStriker: CarromPiece? = null
-        var turnBannerDetected = false
         if (strikerPiece == null && sliderKnobPx == null) {
             val detectedTopStriker = detectTopStrikerOnBaseline(
                 bitmap = screenshot,
@@ -388,7 +418,8 @@ object CarromVisionDetector {
                 }
                 return CarromVisionOutcome.WaitStillnessOrTurn(
                     reason = reason,
-                    boardPieces = promoted
+                    boardPieces = promoted,
+                    turnGlowDetected = turnBannerDetected
                 )
             }
             val hasTargetCoin = promoted.any {
@@ -406,7 +437,8 @@ object CarromVisionDetector {
             } else {
                 return CarromVisionOutcome.NeedsAiVision(
                     diagnostic = "Striker not matched locally (${promoted.size} coins visible, no slider knob); delegating shot to AI Vision.",
-                    boardPieces = promoted
+                    boardPieces = promoted,
+                    turnGlowDetected = turnBannerDetected
                 )
             }
         }
@@ -491,7 +523,8 @@ object CarromVisionDetector {
             }
             CarromVisionOutcome.NeedsAiVision(
                 diagnostic = "No offline shot (targets=$myTargetsCount, total=${promoted.size}, striker=${effectiveStriker != null}); using AI Vision.",
-                boardPieces = promoted
+                boardPieces = promoted,
+                turnGlowDetected = turnBannerDetected
             )
         }
     }
@@ -758,11 +791,16 @@ object CarromVisionDetector {
                 ?.takeIf { p -> abs(p.center.x - refX) <= boardWidthPx * 0.06f }
                 ?.center?.x
         }
+        // Tap-to-teach anchor (Striker Finder): see analyzeAndSolve.
+        val taughtStrikerX = activeCal?.taughtStrikerXNorm?.let { tx ->
+            boardLeft + tx * boardWidthPx
+        }
         val anchorX = resolveStrikerAnchorX(
             sliderKnobPx = sliderKnobPx,
             glowCenterX = glowX,
             appearanceX = appearanceVoteX,
-            boardWidthPx = boardWidthPx
+            boardWidthPx = boardWidthPx,
+            taughtX = taughtStrikerX
         )
         val rawStrikerAligned = rawPieces
             .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
@@ -1712,7 +1750,8 @@ object CarromVisionDetector {
         sliderKnobPx: Point2D?,
         glowCenterX: Float?,
         appearanceX: Float?,
-        boardWidthPx: Float
+        boardWidthPx: Float,
+        taughtX: Float? = null
     ): Float? {
         val knobX = sliderKnobPx?.x
         if (knobX != null && glowCenterX != null) {
@@ -1724,9 +1763,19 @@ object CarromVisionDetector {
                 if (backsKnob) return knobX
                 if (backsGlow) return glowCenterX
             }
+            // Tap-to-teach tiebreak: the user-verified position agrees
+            // with one of the two live signals → trust that one. A taught
+            // position that agrees with NEITHER is stale teaching and is
+            // ignored — live signals always win an open disagreement.
+            if (taughtX != null) {
+                val voteTol = boardWidthPx * 0.06f
+                if (abs(taughtX - knobX) <= voteTol && abs(taughtX - glowCenterX) > voteTol) return knobX
+                if (abs(taughtX - glowCenterX) <= voteTol && abs(taughtX - knobX) > voteTol) return glowCenterX
+            }
             return glowCenterX
         }
-        return glowCenterX ?: knobX
+        // Only one live signal (or none): the taught position fills the gap.
+        return glowCenterX ?: knobX ?: taughtX
     }
 
     private fun detectVividStrikerOnBand(

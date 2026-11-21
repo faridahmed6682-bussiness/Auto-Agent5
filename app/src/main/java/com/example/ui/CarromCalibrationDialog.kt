@@ -124,7 +124,8 @@ import kotlin.math.sin
 private enum class CalibrationToolTab(val label: String) {
     ALIGN("1. Align Pockets"),
     COLORS("2. Pick Colors"),
-    TEST_AIM("3. Test Aim")
+    TEST_AIM("3. Test Aim"),
+    FINDER("4. Striker Finder")
 }
 
 private enum class DragHandleTarget {
@@ -222,7 +223,7 @@ fun CarromCalibrationDialog(
 
     LaunchedEffect(profile, previewCoinColor, previewFreestyle, activeTab) {
         val bm = previewBitmap ?: return@LaunchedEffect
-        if (activeTab == CalibrationToolTab.TEST_AIM) {
+        if (activeTab == CalibrationToolTab.TEST_AIM || activeTab == CalibrationToolTab.FINDER) {
             runAimAnalysis(bm, profile)
         }
     }
@@ -653,6 +654,28 @@ fun CarromCalibrationDialog(
                                     }
                                 }
                                 CalibrationToolTab.TEST_AIM -> Modifier
+                                CalibrationToolTab.FINDER -> Modifier.pointerInput(profile, bm) {
+                                    // Striker Finder tap-to-teach: one tap on
+                                    // the real striker teaches this board
+                                    // profile where the striker sits (stored
+                                    // as board-relative norms, survives
+                                    // screen-size changes). The detector uses
+                                    // it as a tiebreak vote, never as an
+                                    // override of the live knob/glow.
+                                    detectTapGestures { tapOffset ->
+                                        val w = size.width.toFloat().coerceAtLeast(1f)
+                                        val h = size.height.toFloat().coerceAtLeast(1f)
+                                        val bx = (tapOffset.x / w) * bm.width
+                                        val by = (tapOffset.y / h) * bm.height
+                                        val boardW = ((profile.boardRightNorm - profile.boardLeftNorm) * bm.width).coerceAtLeast(1f)
+                                        val boardH = ((profile.boardBottomNorm - profile.boardTopNorm) * bm.height).coerceAtLeast(1f)
+                                        val tx = ((bx - profile.boardLeftNorm * bm.width) / boardW).coerceIn(0f, 1f)
+                                        val ty = ((by - profile.boardTopNorm * bm.height) / boardH).coerceIn(0f, 1f)
+                                        profile = profile.copy(enabled = true, taughtStrikerXNorm = tx, taughtStrikerYNorm = ty)
+                                        statusText = "Striker taught ✓ — এই বোর্ডে স্ট্রাইকার এখানে। Save চাপলে মনে থাকবে।"
+                                        scope.launch { runAimAnalysis(bm, profile) }
+                                    }
+                                }
                             }
 
                             Canvas(
@@ -715,8 +738,10 @@ fun CarromCalibrationDialog(
                                 }
 
                                 // Render live Aim Debug overlays when solved
+                                // (TEST_AIM and the Striker Finder both show
+                                // the aim line: striker → ghost → coin → pocket)
                                 val solved = debugOutcome as? CarromVisionOutcome.SolvedShot
-                                if (activeTab == CalibrationToolTab.TEST_AIM && solved != null) {
+                                if ((activeTab == CalibrationToolTab.TEST_AIM || activeTab == CalibrationToolTab.FINDER) && solved != null) {
                                     val sxScale = cw / bm.width.coerceAtLeast(1).toFloat()
                                     val syScale = ch / bm.height.coerceAtLeast(1).toFloat()
 
@@ -781,6 +806,36 @@ fun CarromCalibrationDialog(
                                         ),
                                         strokeWidth = 4.5f
                                     )
+                                }
+
+                                // Striker Finder marker: the detected striker
+                                // gets a bold ring + crosshair (পাওয়া গেছে),
+                                // and the taught position — if any — is drawn
+                                // as an amber dashed ring, so the user can
+                                // see exactly what the bot remembers.
+                                if (activeTab == CalibrationToolTab.FINDER) {
+                                    val sxScale = cw / bm.width.coerceAtLeast(1).toFloat()
+                                    val syScale = ch / bm.height.coerceAtLeast(1).toFloat()
+                                    val foundStriker = (debugOutcome as? CarromVisionOutcome.SolvedShot)?.detectedStriker
+                                    if (foundStriker != null) {
+                                        val fx = foundStriker.center.x * sxScale
+                                        val fy = foundStriker.center.y * syScale
+                                        drawCircle(CyberTeal, radius = 26f, center = Offset(fx, fy), style = Stroke(width = 4f))
+                                        drawLine(CyberTeal, Offset(fx - 34f, fy), Offset(fx + 34f, fy), strokeWidth = 3f)
+                                        drawLine(CyberTeal, Offset(fx, fy - 34f), Offset(fx, fy + 34f), strokeWidth = 3f)
+                                    }
+                                    val taughtX = profile.taughtStrikerXNorm
+                                    val taughtY = profile.taughtStrikerYNorm
+                                    if (taughtX != null && taughtY != null) {
+                                        val tx = (profile.boardLeftNorm + taughtX * (profile.boardRightNorm - profile.boardLeftNorm)) * cw
+                                        val ty = (profile.boardTopNorm + taughtY * (profile.boardBottomNorm - profile.boardTopNorm)) * ch
+                                        drawCircle(
+                                            AmberWarning,
+                                            radius = 22f,
+                                            center = Offset(tx, ty),
+                                            style = Stroke(width = 3f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f), 0f))
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -908,6 +963,78 @@ fun CarromCalibrationDialog(
                                     }
                                 }
                             }
+                        }
+                    }
+                } else if (activeTab == CalibrationToolTab.FINDER) {
+                    // Striker Finder: did the bot find the striker? Tap the
+                    // real striker on the image above to teach it for this
+                    // board profile — one tap, remembered after Save.
+                    val finderOutcome = debugOutcome
+                    val foundStriker = (finderOutcome as? CarromVisionOutcome.SolvedShot)?.detectedStriker
+                    val finderConf = (finderOutcome as? CarromVisionOutcome.SolvedShot)?.solution?.confidenceScore
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SlateSurfaceElevated),
+                        border = BorderStroke(1.dp, if (foundStriker != null) CyberTeal else AmberWarning),
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = if (foundStriker != null) {
+                                    "স্ট্রাইকার পাওয়া গেছে ✓" + (finderConf?.let { " • ${(it * 100).toInt()}%" } ?: "")
+                                } else {
+                                    "স্ট্রাইকার পাওয়া যায়নি ✗"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (foundStriker != null) CyberTeal else AmberWarning,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = when (finderOutcome) {
+                                    is CarromVisionOutcome.SolvedShot -> if (foundStriker != null) {
+                                        "বট স্ট্রাইকার চিনেছে — সবুজ মার্কার দেখুন। ভুল জায়গায় থাকলে আসল স্ট্রাইকারে ট্যাপ করুন।"
+                                    } else {
+                                        "শট পাওয়া গেছে কিন্তু স্ট্রাইকার মেলেনি — আসল স্ট্রাইকারের উপর ট্যাপ করে শেখান।"
+                                    }
+                                    is CarromVisionOutcome.NeedsAiVision -> finderOutcome.diagnostic
+                                    is CarromVisionOutcome.WaitStillnessOrTurn -> finderOutcome.reason
+                                    null -> "Running local Aim Lab preview…"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (profile.taughtStrikerXNorm != null && profile.taughtStrikerYNorm != null) {
+                                Text(
+                                    text = "শেখানো আছে ✓ এই বোর্ডের জন্য (x=${String.format(Locale.US, "%.2f", profile.taughtStrikerXNorm)}, y=${String.format(Locale.US, "%.2f", profile.taughtStrikerYNorm)})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ElectricCyan
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        val b = previewBitmap ?: return@OutlinedButton
+                                        scope.launch { runAimAnalysis(b, profile) }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .minimumInteractiveComponentSize()
+                                ) {
+                                    Text("Find Striker", style = MaterialTheme.typography.labelMedium)
+                                }
+                                if (profile.taughtStrikerXNorm != null) {
+                                    TextButton(
+                                        onClick = { profile = profile.copy(taughtStrikerXNorm = null, taughtStrikerYNorm = null) },
+                                        modifier = Modifier.minimumInteractiveComponentSize()
+                                    ) {
+                                        Text("Clear Taught", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                            }
+                            Text(
+                                text = "স্ট্রাইকার না পেলে ছবিতে আসল স্ট্রাইকারের উপর একবার ট্যাপ করুন — বট এই বোর্ডের জন্য সেটা মনে রাখবে।",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary
+                            )
                         }
                     }
                 } else {

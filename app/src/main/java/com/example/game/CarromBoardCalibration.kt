@@ -75,7 +75,12 @@ data class BoardCalibrationProfile(
     val whiteColor: CalibratedHsvColor? = null,
     val blackColor: CalibratedHsvColor? = null,
     val queenColor: CalibratedHsvColor? = null,
-    val strikerColor: CalibratedHsvColor? = null
+    val strikerColor: CalibratedHsvColor? = null,
+    // Striker Finder tap-to-teach: the user tapped the real striker once
+    // on this board; board-relative norms (x across board width, y across
+    // board height) so the teaching survives screen-size changes.
+    val taughtStrikerXNorm: Float? = null,
+    val taughtStrikerYNorm: Float? = null
 ) {
     fun resolvedPocketsScreen(widthPx: Float, heightPx: Float): List<Point2D> {
         if (pocketsNorm.size == 4) {
@@ -156,6 +161,8 @@ data class BoardCalibrationProfile(
                 blackColor?.let { put("blackColor", it.toJson()) }
                 queenColor?.let { put("queenColor", it.toJson()) }
                 strikerColor?.let { put("strikerColor", it.toJson()) }
+                taughtStrikerXNorm?.let { put("taughtStrikerXNorm", it.toDouble()) }
+                taughtStrikerYNorm?.let { put("taughtStrikerYNorm", it.toDouble()) }
             }
     }
 
@@ -201,7 +208,11 @@ data class BoardCalibrationProfile(
                 whiteColor = CalibratedHsvColor.fromJson(obj.optJSONObject("whiteColor")),
                 blackColor = CalibratedHsvColor.fromJson(obj.optJSONObject("blackColor")),
                 queenColor = CalibratedHsvColor.fromJson(obj.optJSONObject("queenColor")),
-                strikerColor = CalibratedHsvColor.fromJson(obj.optJSONObject("strikerColor"))
+                strikerColor = CalibratedHsvColor.fromJson(obj.optJSONObject("strikerColor")),
+                taughtStrikerXNorm = obj.optDouble("taughtStrikerXNorm", -1.0).toFloat()
+                    .let { if (it < 0f) null else it.coerceIn(0f, 1f) },
+                taughtStrikerYNorm = obj.optDouble("taughtStrikerYNorm", -1.0).toFloat()
+                    .let { if (it < 0f) null else it.coerceIn(0f, 1f) }
             )
         }
     }

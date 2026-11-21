@@ -1717,6 +1717,19 @@ object AgentCoordinator {
         allowRepositionByBudget: Boolean
     ): CarromActionResult {
         var aiPreCarromCounts: BoardPieceCounts? = null
+        // Anchor the 5s turn clock at the FIRST sighting of the turn glow,
+        // not at the first solved shot: the game clock starts when the turn
+        // starts, and motion/turn waits before the first solve used to burn
+        // the whole window while our clock still read 0. ensureTurnStarted
+        // only sets the clock once, so later cycles keep the first sighting.
+        val glowSeen = when (outcome) {
+            is CarromVisionOutcome.SolvedShot -> outcome.turnBanner
+            is CarromVisionOutcome.WaitStillnessOrTurn -> outcome.turnGlowDetected
+            is CarromVisionOutcome.NeedsAiVision -> outcome.turnGlowDetected
+        }
+        if (glowSeen) {
+            state.carromTurnMemory.ensureTurnStarted(nowCarromMs)
+        }
         return when (outcome) {
             is CarromVisionOutcome.WaitStillnessOrTurn -> {
         state.carromOfflineWaits++
