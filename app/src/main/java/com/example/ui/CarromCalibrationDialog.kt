@@ -879,7 +879,7 @@ fun CarromCalibrationDialog(
                         ) {
                             Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(
-                                    text = "Striker Sweep — ${sweepEntries.size}টি জায়গা যাচাই • পকেটে যাবে $potsNটি",
+                                    text = "Striker Sweep — ${sweepEntries.size}টি জায়গা যাচাই • পকেটে যাবে ${potsN}টি",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = ElectricCyan,
                                     fontWeight = FontWeight.Bold

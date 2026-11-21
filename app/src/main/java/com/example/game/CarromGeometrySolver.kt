@@ -316,11 +316,11 @@ object CarromGeometrySolver {
 
                     // Distance-banded learned power: same pocket + cut needs
                     // different power at short vs long range.
+                    val distRatio = ((distStrikerGhost + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
                     val learnedPowerScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutAngleDeg, distRatio) ?: 1.0f
                     val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
                     val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
                     val baseMult = if (isHanger) 0.85f else 1.0f
-                    val distRatio = ((distStrikerGhost + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
 
                     val trainingMatch = shotMemory?.matchCleanShotPattern(
                         board = board,
@@ -767,10 +767,10 @@ object CarromGeometrySolver {
                     )
                     if (!clearCoinToPocket && !clearStrikerToGhost) continue
 
+                    val distRatio = ((distSg + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
                     val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
                     val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg, distRatio) ?: 1.0f
                     val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
-                    val distRatio = ((distSg + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
 
                     val trainingMatch = shotMemory?.matchCleanShotPattern(
                         board = board,
