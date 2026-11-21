@@ -58,7 +58,7 @@ data class WhatsAppBridgeConfig(
     val status: WhatsAppConnectionStatus = WhatsAppConnectionStatus.DISCONNECTED,
     val connectedPhone: String = "",
     val autoReplyEnabled: Boolean = true,
-    val aiReplyInstruction: String = "তুমি একজন ভদ্র ও সহায়ক AI সহকারী। কাস্টমার বা বন্ধুর সাথে প্রাসঙ্গিক, সংক্ষিপ্ত ও স্বাভাবিক বাংলা/Banglish-এ কথা বলো।",
+    val aiReplyInstruction: String = HUMAN_DEFAULT_INSTRUCTION,
     val totalRepliesSent: Int = 0,
     val logs: List<WhatsAppBridgeLog> = emptyList()
 ) {
@@ -79,6 +79,9 @@ data class WhatsAppBridgeConfig(
     }
 
     companion object {
+        const val HUMAN_DEFAULT_INSTRUCTION =
+            "মানুষের মতো স্বাভাবিকভাবে সংক্ষিপ্ত ও আন্তরিক বাংলা/Banglish-এ রিপ্লাই দাও। নিজেকে কখনো AI বা বট বলবে না; সামনের মানুষ যেভাবে (তুমি/আপনি) কথা বলে সেভাবেই উত্তর দেবে।"
+
         fun fromJson(raw: String): WhatsAppBridgeConfig {
             if (raw.isBlank()) return WhatsAppBridgeConfig()
             return runCatching {
@@ -94,6 +97,12 @@ data class WhatsAppBridgeConfig(
                 val parsedStatus = runCatching {
                     WhatsAppConnectionStatus.valueOf(obj.optString("status", "DISCONNECTED"))
                 }.getOrDefault(WhatsAppConnectionStatus.DISCONNECTED)
+                val savedPrompt = obj.optString("aiReplyInstruction", "").trim()
+                val normalizedPrompt = if (savedPrompt.isEmpty() || savedPrompt.contains("ভদ্র ও সহায়ক AI সহকারী")) {
+                    HUMAN_DEFAULT_INSTRUCTION
+                } else {
+                    savedPrompt
+                }
                 WhatsAppBridgeConfig(
                     serverUrl = obj.optString("serverUrl", ""),
                     bridgeSecret = obj.optString("bridgeSecret", ""),
@@ -103,10 +112,7 @@ data class WhatsAppBridgeConfig(
                     status = parsedStatus,
                     connectedPhone = obj.optString("connectedPhone", ""),
                     autoReplyEnabled = obj.optBoolean("autoReplyEnabled", true),
-                    aiReplyInstruction = obj.optString(
-                        "aiReplyInstruction",
-                        "তুমি একজন ভদ্র ও সহায়ক AI সহকারী। কাস্টমার বা বন্ধুর সাথে প্রাসঙ্গিক, সংক্ষিপ্ত ও স্বাভাবিক বাংলা/Banglish-এ কথা বলো।"
-                    ),
+                    aiReplyInstruction = normalizedPrompt,
                     totalRepliesSent = obj.optInt("totalRepliesSent", 0),
                     logs = logs
                 )

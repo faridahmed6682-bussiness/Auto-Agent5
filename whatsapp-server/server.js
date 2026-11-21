@@ -109,20 +109,52 @@ function verifyBridgeSecret(req, res, next) {
     return next();
 }
 
+// Per-chat sliding conversation history keyed by `${userId}:${sender}`
+const chatHistories = new Map();
+// Short debounce buffer to group rapid back-to-back messages from the same sender
+const pendingChatBatches = new Map();
+
+const DEFAULT_HUMAN_PROMPT =
+    'মানুষের মতো স্বাভাবিকভাবে সংক্ষিপ্ত ও আন্তরিক বাংলা/Banglish-এ রিপ্লাই দাও। নিজেকে কখনো AI, সহকারী বা বট বলবে না; সামনের মানুষ যেভাবে (তুমি/আপনি) কথা বলবে সেভাবেই সহজ ও প্রাসঙ্গিক উত্তর দেবে।';
+
+function normalizeSystemPrompt(rawPrompt) {
+    const clean = String(rawPrompt || '').trim();
+    if (!clean || clean.includes('ভদ্র ও সহায়ক AI সহকারী')) {
+        return DEFAULT_HUMAN_PROMPT;
+    }
+    return clean;
+}
+
 function getOrDefaultConfig(userId) {
     if (!userConfigs.has(userId)) {
         const existingWa = connectorsStore.getConnectorWithCredentials(userId, 'whatsapp');
         userConfigs.set(userId, {
             autoReplyEnabled: existingWa?.automation_rules?.whatsappAutoReply ?? true,
-            systemPrompt:
-                existingWa?.automation_rules?.systemPrompt ||
-                'তুমি একজন ভদ্র ও সহায়ক AI সহকারী। কাস্টমার বা বন্ধুর সাথে প্রাসঙ্গিক, সংক্ষিপ্ত ও স্বাভাবিক বাংলা/Banglish-এ কথা বলো।',
-            contacts: [],
+            systemPrompt: normalizeSystemPrompt(existingWa?.automation_rules?.systemPrompt),
+            contacts: Array.isArray(existingWa?.automation_rules?.contacts)
+                ? existingWa.automation_rules.contacts
+                : [],
             totalRepliesSent: 0,
             recentReplies: []
         });
     }
     return userConfigs.get(userId);
+}
+
+function getChatHistory(userId, sender) {
+    const key = `${userId}:${sender}`;
+    return chatHistories.get(key) || [];
+}
+
+function appendChatHistory(userId, sender, userMsg, assistantReply) {
+    const key = `${userId}:${sender}`;
+    const existing = chatHistories.get(key) || [];
+    const updated = [
+        ...existing,
+        { role: 'user', content: String(userMsg || '').slice(0, 600) },
+        { role: 'assistant', content: String(assistantReply || '').slice(0, 600) }
+    ].slice(-12);
+    chatHistories.set(key, updated);
 }
 
 function wasRecentlyProcessed(messageId) {
@@ -154,10 +186,11 @@ function extractIncomingText(msg) {
  * Modular AI Agent hook invoked for incoming WhatsApp messages.
  * Automatically leverages connected Google Calendar / Gmail tools if Smart Assistant Sync is ON.
  */
-async function runAIAgent({ userId, sender, pushName, text }) {
+async function runAIAgent({ userId, sender, pushName, text, ownerName = '' }) {
     const cfg = getOrDefaultConfig(userId);
     const senderDigits = sender.split('@')[0] || '';
     const displayName = (pushName || senderDigits || 'Friend').trim();
+    const history = getChatHistory(userId, sender);
 
     const matchedContact = (cfg.contacts || []).find((c) => {
         const contactName = String(c.name || '').trim().toLowerCase();
@@ -169,9 +202,10 @@ async function runAIAgent({ userId, sender, pushName, text }) {
     });
 
     const relationshipHint = matchedContact
-        ? `Matched Contact: ${matchedContact.name} | Relationship: ${matchedContact.relationship} | Custom Note: ${matchedContact.styleNote || 'Normal friendly tone'}`
-        : `Sender Name: ${displayName}`;
+        ? `Relationship Contact Match -> Name: ${matchedContact.name} | Relationship: ${matchedContact.relationship} | Tone/Note: ${matchedContact.styleNote || 'Normal warm human tone'}`
+        : `Sender Name: ${displayName} (Number: ${senderDigits})`;
 
+    const effectivePrompt = normalizeSystemPrompt(cfg.systemPrompt);
     const waRecord = connectorsStore.getConnectorWithCredentials(userId, 'whatsapp');
     const smartSyncOn = waRecord?.automation_rules?.smartAssistantSync !== false;
 
@@ -180,21 +214,33 @@ async function runAIAgent({ userId, sender, pushName, text }) {
             userId,
             message: text,
             channel: 'whatsapp',
-            extraContext: `${cfg.systemPrompt}\n${relationshipHint}`
+            extraContext: `${effectivePrompt}\n${relationshipHint}`,
+            history,
+            ownerName
         });
+        if (result.reply) {
+            appendChatHistory(userId, sender, text, result.reply);
+        }
         return result.reply;
     }
 
-    const aiReply = await agentTools.callLLM(
-        `${cfg.systemPrompt}\n${relationshipHint}`,
-        `Sender (${displayName}): ${text}`
-    );
-    if (aiReply) return aiReply;
+    const humanDirectPrompt = [
+        `You are texting on WhatsApp on behalf of ${ownerName || 'the phone owner'} as a real Bangladeshi human.`,
+        'Never say you are an AI or bot. Reply naturally in 1–2 short conversational sentences matching the sender’s tone (তুমি/আপনি).',
+        effectivePrompt,
+        relationshipHint
+    ].join('\n\n');
+
+    const aiReply = await agentTools.callLLM(humanDirectPrompt, text, history);
+    if (aiReply) {
+        appendChatHistory(userId, sender, text, aiReply);
+        return aiReply;
+    }
 
     if (matchedContact) {
-        return `হ্যালো ${matchedContact.name}! আপনার মেসেজটি পেয়েছি। একটু পর বিস্তারিত জানাচ্ছি।`;
+        return `হ্যালো ${matchedContact.name}, একটু ব্যস্ত ছিলাম। একটু পর কথা বলছি।`;
     }
-    return `আসসালামু আলাইকুম ${displayName}! আপনার মেসেজটি পেয়েছি। কিছুক্ষণের মধ্যেই উত্তর দিচ্ছি।`;
+    return 'এইতো একটু কাজে আছি, একটু পর রিপ্লাই দিচ্ছি।';
 }
 
 async function createBaileysSession(userId, phoneNumberDigits = '') {
@@ -298,25 +344,64 @@ async function createBaileysSession(userId, phoneNumberDigits = '') {
                 if (!sender || sender === 'status@broadcast' || sender.endsWith('@g.us')) continue;
                 if (wasRecentlyProcessed(msg.key?.id)) continue;
 
+                // Skip old backlog messages received before server connected
+                const rawTs = Number(msg.messageTimestamp || 0);
+                if (rawTs > 0 && Date.now() / 1000 - rawTs > 120) continue;
+
                 const text = extractIncomingText(msg);
                 if (!text) continue;
 
-                const reply = await runAIAgent({
-                    userId,
-                    sender,
-                    pushName: msg.pushName || '',
-                    text
-                });
-                if (!reply) continue;
+                const batchKey = `${userId}:${sender}`;
+                const existingBatch = pendingChatBatches.get(batchKey);
+                if (existingBatch) {
+                    clearTimeout(existingBatch.timer);
+                    existingBatch.texts.push(text);
+                    if (msg.pushName) existingBatch.pushName = msg.pushName;
+                } else {
+                    pendingChatBatches.set(batchKey, {
+                        texts: [text],
+                        pushName: msg.pushName || '',
+                        timer: null
+                    });
+                }
 
-                await sock.sendMessage(sender, { text: reply }, { quoted: msg });
-                cfg.totalRepliesSent += 1;
-                cfg.recentReplies = [
-                    `${msg.pushName || sender.split('@')[0]}: ${reply.slice(0, 70)}`,
-                    ...cfg.recentReplies
-                ].slice(0, 15);
+                const batch = pendingChatBatches.get(batchKey);
+                batch.timer = setTimeout(async () => {
+                    pendingChatBatches.delete(batchKey);
+                    const combinedText = batch.texts.join('\n').trim();
+                    if (!combinedText) return;
+
+                    try {
+                        try {
+                            await sock.sendPresenceUpdate('composing', sender);
+                        } catch (_) {}
+
+                        const ownerName = sock.user?.name || '';
+                        const reply = await runAIAgent({
+                            userId,
+                            sender,
+                            pushName: batch.pushName,
+                            text: combinedText,
+                            ownerName
+                        });
+                        if (!reply) return;
+
+                        await sock.sendMessage(sender, { text: reply });
+                        try {
+                            await sock.sendPresenceUpdate('paused', sender);
+                        } catch (_) {}
+
+                        cfg.totalRepliesSent += 1;
+                        cfg.recentReplies = [
+                            `${batch.pushName || sender.split('@')[0]}: ${reply.slice(0, 70)}`,
+                            ...cfg.recentReplies
+                        ].slice(0, 15);
+                    } catch (innerErr) {
+                        console.error(`[WhatsApp][${userId}] Auto-reply error:`, innerErr.message);
+                    }
+                }, 1800);
             } catch (err) {
-                console.error(`[WhatsApp][${userId}] Auto-reply error:`, err.message);
+                console.error(`[WhatsApp][${userId}] Message queue error:`, err.message);
             }
         }
     });
@@ -680,7 +765,7 @@ app.post('/api/whatsapp/config', verifyBridgeSecret, (req, res) => {
         });
     }
     if (typeof req.body?.systemPrompt === 'string' && req.body.systemPrompt.trim()) {
-        cfg.systemPrompt = req.body.systemPrompt.trim().slice(0, 1500);
+        cfg.systemPrompt = normalizeSystemPrompt(req.body.systemPrompt.trim().slice(0, 1500));
         connectorsStore.updateAutomationRules(userId, 'whatsapp', {
             systemPrompt: cfg.systemPrompt
         });
@@ -691,6 +776,9 @@ app.post('/api/whatsapp/config', verifyBridgeSecret, (req, res) => {
             relationship: String(c?.relationship || '').slice(0, 60),
             styleNote: String(c?.styleNote || '').slice(0, 240)
         }));
+        connectorsStore.updateAutomationRules(userId, 'whatsapp', {
+            contacts: cfg.contacts
+        });
     }
     return res.json({ ok: true, userId, autoReplyEnabled: cfg.autoReplyEnabled });
 });
