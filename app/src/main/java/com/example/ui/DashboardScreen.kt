@@ -89,12 +89,16 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val waConfig by viewModel.waConfig.collectAsStateWithLifecycle()
     val waIsBusy by viewModel.waIsBusy.collectAsStateWithLifecycle()
     val waStatusBanner by viewModel.waStatusBanner.collectAsStateWithLifecycle()
+    val unifiedState by viewModel.unifiedState.collectAsStateWithLifecycle()
+    val unifiedIsBusy by viewModel.unifiedIsBusy.collectAsStateWithLifecycle()
+    val unifiedBanner by viewModel.unifiedBanner.collectAsStateWithLifecycle()
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var showContactDialog by remember { mutableStateOf(false) }
     var showCalibrationDialog by rememberSaveable { mutableStateOf(false) }
     var showFacebookHubDialog by rememberSaveable { mutableStateOf(false) }
     var showWhatsAppHubDialog by rememberSaveable { mutableStateOf(false) }
+    var showUnifiedHubDialog by rememberSaveable { mutableStateOf(false) }
     var editingContact by remember { mutableStateOf<ContactProfile?>(null) }
     var autoRequestedProjectionThisSession by rememberSaveable { mutableStateOf(false) }
     var launchPendingAfterProjection by remember { mutableStateOf(false) }
@@ -187,6 +191,9 @@ fun DashboardScreen(viewModel: AgentViewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshAccessibilityStatus()
+                if (showUnifiedHubDialog) {
+                    viewModel.unifiedRefresh()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -366,6 +373,14 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                         fbConfig = fbConfig,
                         onOpenFacebookHub = { showFacebookHubDialog = true },
                         onToggleAutoResponder = viewModel::fbToggleAutoResponder
+                    )
+                }
+
+                item {
+                    UnifiedConnectorHubQuickCard(
+                        unifiedState = unifiedState,
+                        waConfig = waConfig,
+                        onOpenUnifiedHub = { showUnifiedHubDialog = true }
                     )
                 }
 
@@ -581,6 +596,28 @@ fun DashboardScreen(viewModel: AgentViewModel) {
             onDisconnect = viewModel::waDisconnect,
             onDismissBanner = viewModel::waDismissBanner,
             onDismiss = { showWhatsAppHubDialog = false }
+        )
+    }
+
+    if (showUnifiedHubDialog) {
+        UnifiedConnectorHubDialog(
+            state = unifiedState,
+            waConfig = waConfig,
+            isBusy = unifiedIsBusy,
+            statusBanner = unifiedBanner,
+            onSaveServerConfig = viewModel::unifiedSaveServer,
+            onRefreshHub = viewModel::unifiedRefresh,
+            onStartGoogleOAuth = viewModel::unifiedStartGoogleOAuth,
+            onToggleGmailAutoReply = viewModel::unifiedToggleGmail,
+            onRunGmailAutoDrafts = viewModel::unifiedRunGmailAutoDrafts,
+            onOpenWhatsAppModal = { showWhatsAppHubDialog = true },
+            onToggleWhatsAppAutoReply = viewModel::unifiedToggleWhatsApp,
+            onConnectCustomTool = viewModel::unifiedConnectCustomTool,
+            onDisconnectProvider = viewModel::unifiedDisconnect,
+            onToggleSmartSync = viewModel::unifiedToggleSmartSync,
+            onAskSmartAssistant = viewModel::unifiedAskAssistant,
+            onDismissBanner = viewModel::unifiedDismissBanner,
+            onDismiss = { showUnifiedHubDialog = false }
         )
     }
 }

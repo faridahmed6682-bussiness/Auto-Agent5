@@ -918,6 +918,104 @@ fun FacebookAutomationQuickCard(
 }
 
 @Composable
+fun UnifiedConnectorHubQuickCard(
+    unifiedState: com.example.connectors.UnifiedConnectorState,
+    waConfig: com.example.whatsapp.WhatsAppBridgeConfig,
+    onOpenUnifiedHub: () -> Unit
+) {
+    val googleConnected = unifiedState.recordFor(com.example.connectors.ConnectorProvider.GOOGLE).isConnected
+    val waConnected = unifiedState.recordFor(com.example.connectors.ConnectorProvider.WHATSAPP).isConnected ||
+        waConfig.status == com.example.whatsapp.WhatsAppConnectionStatus.CONNECTED
+    val totalActiveTools = unifiedState.activeTools.size
+    val anyConnected = googleConnected || waConnected || unifiedState.connectedCount() > 0
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (anyConnected) CyberTealDark.copy(alpha = 0.35f) else SlateSurface
+        ),
+        border = BorderStroke(1.dp, if (anyConnected) CyberTeal else SlateBorder),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        tint = if (anyConnected) CyberTeal else ElectricCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.unified_hub_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (anyConnected) CyberTealDark else SlateSurfaceElevated)
+                        .border(1.dp, if (anyConnected) CyberTeal else SlateBorder, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = if (totalActiveTools > 0) "$totalActiveTools TOOLS LIVE" else "GMAIL + WA",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (anyConnected) CyberTeal else ElectricCyan,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = if (anyConnected) {
+                    "Google: ${if (googleConnected) "Connected ✅" else "Off"} • WhatsApp: ${if (waConnected) "Connected ✅" else "Off"} • Smart Sync: ${if (unifiedState.smartAssistantSync) "ON" else "OFF"}"
+                } else {
+                    stringResource(R.string.unified_hub_desc)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (anyConnected) ElectricCyan else TextSecondary
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = onOpenUnifiedHub,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .minimumInteractiveComponentSize()
+                    .height(48.dp)
+                    .testTag("btn_open_unified_hub"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ElectricCyan,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Tune,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(R.string.action_open_unified_hub),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun WhatsAppConnectorQuickCard(
     waConfig: com.example.whatsapp.WhatsAppBridgeConfig,
     onOpenWhatsAppHub: () -> Unit,

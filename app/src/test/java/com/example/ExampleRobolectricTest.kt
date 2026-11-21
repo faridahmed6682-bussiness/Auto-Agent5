@@ -1869,6 +1869,76 @@ class ExampleRobolectricTest {
         assertEquals(1, decoded.logs.size)
         assertEquals("Connected ✅", decoded.logs[0].title)
     }
+
+    @Test
+    fun `unified connector hub validates google oauth url, webhook ssrf safety, and round-trips state json`() {
+        org.junit.Assert.assertTrue(
+            com.example.connectors.UnifiedConnectorRepository.isValidGoogleOAuthUrl(
+                "https://accounts.google.com/o/oauth2/v2/auth?client_id=abc"
+            )
+        )
+        org.junit.Assert.assertFalse(
+            com.example.connectors.UnifiedConnectorRepository.isValidGoogleOAuthUrl(
+                "https://evil.example.com/o/oauth2/v2/auth"
+            )
+        )
+        org.junit.Assert.assertTrue(
+            com.example.connectors.UnifiedConnectorRepository.isValidCustomCredential(
+                com.example.connectors.ConnectorProvider.WEBHOOK,
+                "https://hooks.example.com/events"
+            )
+        )
+        org.junit.Assert.assertFalse(
+            com.example.connectors.UnifiedConnectorRepository.isValidCustomCredential(
+                com.example.connectors.ConnectorProvider.WEBHOOK,
+                "https://127.0.0.1/internal"
+            )
+        )
+        org.junit.Assert.assertTrue(
+            com.example.connectors.UnifiedConnectorRepository.isValidCustomCredential(
+                com.example.connectors.ConnectorProvider.TELEGRAM,
+                "123456789:AAH1234567890abcdefghij"
+            )
+        )
+
+        val state = com.example.connectors.UnifiedConnectorState(
+            serverUrl = "https://hub.example.com",
+            userId = "tappilot_main",
+            googleOAuthConfigured = true,
+            connectors = listOf(
+                com.example.connectors.UnifiedConnectorRecord(
+                    userId = "tappilot_main",
+                    provider = com.example.connectors.ConnectorProvider.GOOGLE,
+                    scopesOrMetaSummary = "farid@gmail.com (Gmail + Calendar + Drive)",
+                    isConnected = true,
+                    gmailAutoReply = true,
+                    gmailReplyMode = "draft"
+                ),
+                com.example.connectors.UnifiedConnectorRecord(
+                    userId = "tappilot_main",
+                    provider = com.example.connectors.ConnectorProvider.WHATSAPP,
+                    scopesOrMetaSummary = "Linked: 8801712345678",
+                    isConnected = true,
+                    whatsappAutoReply = true
+                )
+            ),
+            activeTools = listOf(
+                com.example.connectors.AgentToolBadge(
+                    id = "gmail_read_summary",
+                    provider = "google",
+                    label = "Gmail Read & AI Summary",
+                    autoEnabled = true
+                )
+            ),
+            smartAssistantSync = true
+        )
+        val restored = com.example.connectors.UnifiedConnectorState.fromJson(state.toJson().toString())
+        assertEquals("https://hub.example.com", restored.serverUrl)
+        assertEquals(2, restored.connectedCount())
+        org.junit.Assert.assertTrue(restored.recordFor(com.example.connectors.ConnectorProvider.GOOGLE).gmailAutoReply)
+        assertEquals(1, restored.activeTools.size)
+        assertEquals("gmail_read_summary", restored.activeTools[0].id)
+    }
 }
 
 

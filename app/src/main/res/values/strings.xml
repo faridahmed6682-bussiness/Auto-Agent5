@@ -152,4 +152,8 @@
     <string name="wa_hub_desc">Connect your companion Node.js Baileys server with an 8-digit WhatsApp Pairing Code for 24/7 AI auto-replies in background.</string>
     <string name="action_open_wa_hub">Open WhatsApp Pairing Hub</string>
     <string name="cd_close_wa_hub">Close WhatsApp Pairing Hub</string>
+    <string name="unified_hub_title">Unified Connector Hub</string>
+    <string name="unified_hub_desc">1-click connect Gmail, Calendar, Drive, WhatsApp &amp; Telegram in one shared AI Agent connector hub.</string>
+    <string name="action_open_unified_hub">Open Unified Connectors Hub</string>
+    <string name="cd_close_unified_hub">Close Unified Connector Hub</string>
 </resources>

@@ -36,6 +36,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         AgentCoordinator.initialize(application.applicationContext)
         com.example.facebook.FacebookAutomationManager.initialize(application.applicationContext)
         com.example.whatsapp.WhatsAppBridgeManager.initialize(application.applicationContext)
+        com.example.connectors.UnifiedConnectorManager.initialize(application.applicationContext)
     }
 
     val agentState: StateFlow<AgentUiState> = AgentCoordinator.uiState
@@ -54,6 +55,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val waConfig: StateFlow<com.example.whatsapp.WhatsAppBridgeConfig> = com.example.whatsapp.WhatsAppBridgeManager.config
     val waIsBusy: StateFlow<Boolean> = com.example.whatsapp.WhatsAppBridgeManager.isBusy
     val waStatusBanner: StateFlow<String?> = com.example.whatsapp.WhatsAppBridgeManager.statusBanner
+    val unifiedState: StateFlow<com.example.connectors.UnifiedConnectorState> = com.example.connectors.UnifiedConnectorManager.state
+    val unifiedIsBusy: StateFlow<Boolean> = com.example.connectors.UnifiedConnectorManager.isBusy
+    val unifiedBanner: StateFlow<String?> = com.example.connectors.UnifiedConnectorManager.statusBanner
 
     private val _goalText = MutableStateFlow("")
     val goalText: StateFlow<String> = _goalText.asStateFlow()
@@ -301,4 +305,30 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     fun waDisconnect() = com.example.whatsapp.WhatsAppBridgeManager.disconnectSession()
     fun waDismissBanner() = com.example.whatsapp.WhatsAppBridgeManager.dismissBanner()
+
+    fun unifiedSaveServer(serverUrl: String, secret: String, userId: String) =
+        com.example.connectors.UnifiedConnectorManager.updateServerConfig(serverUrl, secret, userId)
+    fun unifiedRefresh() = com.example.connectors.UnifiedConnectorManager.refreshHub(silent = false)
+    fun unifiedStartGoogleOAuth(
+        serverUrl: String,
+        secret: String,
+        userId: String,
+        onUrlReady: (String) -> Unit
+    ) = com.example.connectors.UnifiedConnectorManager.startGoogleOAuth(serverUrl, secret, userId, onUrlReady)
+    fun unifiedToggleGmail(enabled: Boolean, mode: String?) =
+        com.example.connectors.UnifiedConnectorManager.toggleGmailAutoReply(enabled, mode)
+    fun unifiedRunGmailAutoDrafts() =
+        com.example.connectors.UnifiedConnectorManager.runGmailAutoDrafts()
+    fun unifiedToggleWhatsApp(enabled: Boolean) =
+        com.example.connectors.UnifiedConnectorManager.toggleWhatsAppAutoReply(enabled)
+    fun unifiedConnectCustomTool(provider: com.example.connectors.ConnectorProvider, cred: String) =
+        com.example.connectors.UnifiedConnectorManager.connectCustomTool(provider, cred)
+    fun unifiedDisconnect(provider: com.example.connectors.ConnectorProvider) =
+        com.example.connectors.UnifiedConnectorManager.disconnectProvider(provider)
+    fun unifiedToggleSmartSync(enabled: Boolean) =
+        com.example.connectors.UnifiedConnectorManager.toggleSmartAssistantSync(enabled)
+    fun unifiedAskAssistant(prompt: String) =
+        com.example.connectors.UnifiedConnectorManager.askSmartAssistant(prompt)
+    fun unifiedDismissBanner() =
+        com.example.connectors.UnifiedConnectorManager.dismissBanner()
 }
