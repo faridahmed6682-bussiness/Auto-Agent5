@@ -69,6 +69,10 @@ data class CarromShotSolution(
     val isComboShot: Boolean = false,
     val isBreakShot: Boolean = false,
     val isSureShot: Boolean = false,
+    // Foul-safe safety shot: a soft touch that parks the striker behind
+    // coins instead of gambling on a pot. Never a scoring attempt, and
+    // never recorded as a pot attempt in shot memory.
+    val isSafetyShot: Boolean = false,
     val isCollisionAssistedSureShot: Boolean = false,
     val isTrainingMatched: Boolean = false,
     val rejectedDueToCollisionOrFoul: Boolean = false,
@@ -221,7 +225,11 @@ object CarromGeometrySolver {
         )
         if (strikerCandidates.isEmpty()) return null
 
-        val extraScratchGuard = shotMemory?.needsExtraScratchGuard() == true
+        // 5s sure-shot / no-foul rule: the scratch guard ALWAYS runs with
+        // its wide safety margins (1.48x follow-through / 1.34x deflection),
+        // not only after a foul has already happened — a first foul must
+        // never be the teacher. The physics rollout re-checks the winner.
+        val extraScratchGuard = true
         val inPlaceAdj = shotMemory?.placementStats?.inPlaceBonusAdjustment() ?: 0f
         val directPool = mutableListOf<RolloutCandidate>()
         var bestDirect: CarromShotSolution? = null
@@ -276,6 +284,19 @@ object CarromGeometrySolver {
                             clearanceRadius = board.coinRadiusPx + board.strikerRadiusPx * 0.88f
                         )
                     ) {
+                        continue
+                    }
+
+                    // Ghost-ball neighbourhood check (fixes the W3/B4 miss): the
+                    // segment check above ignores obstacles whose projection
+                    // falls right at the ghost ball, so a coin sitting ON the
+                    // impact point itself would be missed. No other coin may
+                    // sit within striking distance of the ghost ball, or the
+                    // striker clips it just before impact.
+                    val ghostClearRadius = board.coinRadiusPx * 1.2f + board.strikerRadiusPx
+                    if (obstacles.any { other ->
+                            other !== coin && (other.center - ghostBall).length() < ghostClearRadius
+                        }) {
                         continue
                     }
 
@@ -433,6 +454,41 @@ object CarromGeometrySolver {
                             pullMultiplier = effectiveMult
                         )
                     }
+                }
+            }
+        }
+
+        // Tier 0: Fast sure-shot finder (5s budget) — before the full solve,
+        // check only the 2-3 coins nearest a pocket. If ONE physics-verified
+        // sure shot is found there, fire it immediately WITHOUT running the
+        // Tier-1 / Tier-2 / bank / combo rollouts. This is the main speed
+        // win for the 5-second deadline: a single-candidate rollout
+        // (~5-15ms) instead of up to 5 full-tier rollouts (~14 candidates
+        // each). If no sure shot is found here, fall through to Tier 1 —
+        // nothing is lost, the same candidates are re-checked below.
+        if (usePhysicsRollout && directPool.isNotEmpty()) {
+            val nearestCoins = targetPieces
+                .map { coin -> coin to board.pockets.minOf { pocket -> (pocket - coin.center).length() } }
+                .sortedBy { it.second }
+                .take(3)
+                .map { it.first }
+                .toSet()
+            val fastCandidate = directPool
+                .filter { it.targetCoin in nearestCoins && it.cutAngleDeg <= 30f && it.staticScore >= 0.68f }
+                .maxByOrNull { it.staticScore }
+            if (fastCandidate != null) {
+                val fastVerified = refineWithPhysicsRollout(
+                    board = board,
+                    pieces = pieces,
+                    myCoinColor = myCoinColor,
+                    candidates = listOf(fastCandidate),
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight,
+                    shotMemory = shotMemory,
+                    isFreestyle = isFreestyle
+                )
+                if (fastVerified != null && fastVerified.isSureShot) {
+                    return fastVerified
                 }
             }
         }
@@ -865,9 +921,153 @@ object CarromGeometrySolver {
         return ranked
     }
 
+    // Soft power for safety touches: the striker only needs to reach the
+    // nearest own coin and stop behind it. computeSlingshotDragEnd clamps
+    // the effective power to a 0.45 minimum, so this is the softest legal
+    // pull the slingshot model can express.
+    private const val SAFETY_SHOT_PULL_MULTIPLIER = 0.60f
+
     /**
-     * Deadline fallback (used at ~8.3–8.5s if zero pure Sure Shots were verified):
-     * returns the highest-scoring foul-free pot attempt, or a guaranteed cluster break shot.
+     * Safety shot — the ONLY fallback when no physics-verified sure pot
+     * exists (5s sure-shot / no-foul rule). A soft touch on the nearest
+     * own coin that parks the striker behind the coins instead of gambling
+     * on a pot:
+     * - aims straight at the nearest own coin (freestyle: any coin), so the
+     *   striker is guaranteed to contact a coin (missing every coin is
+     *   itself a foul);
+     * - tries small aim offsets if the straight touch fails a foul check;
+     * - passes the wide-margin scratch guard, a clear striker path, and a
+     *   check that the touched coin is not driven toward any pocket over
+     *   the short distance soft power can move it;
+     * - never repeats a learned foul pattern (foul blacklist).
+     * Returns null only when no coin can be touched foul-free (in practice
+     * unreachable while any coin is on the board).
+     */
+    fun solveSafetyShot(
+        board: CarromBoardLayout,
+        pieces: List<CarromPiece>,
+        myCoinColor: CoinColor,
+        screenWidth: Int,
+        screenHeight: Int,
+        existingStriker: CarromPiece?,
+        shotMemory: CarromMemoryData? = null,
+        isFreestyle: Boolean = false
+    ): CarromShotSolution? {
+        if (board.pockets.size < 4) return null
+        val targets = if (isFreestyle) {
+            pieces.filter { it.color != CoinColor.STRIKER }
+        } else {
+            pieces.filter { it.color == myCoinColor }
+                .ifEmpty { pieces.filter { it.color == CoinColor.QUEEN } }
+                .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
+        }
+        if (targets.isEmpty()) return null
+        val margin = board.strikerRadiusPx * 2.1f
+        val strikerPos = existingStriker?.center?.let {
+            Point2D(it.x.coerceIn(board.left + margin, board.right - margin), it.y)
+        } ?: Point2D(board.left + board.width * 0.5f, board.baselineY)
+        val obstacles = pieces.filter { it.color != CoinColor.STRIKER }
+        val aimOffsetsDeg = floatArrayOf(0f, -12f, 12f, -24f, 24f, -36f, 36f)
+        val sortedTargets = targets.sortedBy { (it.center - strikerPos).length() }
+        for (coin in sortedTargets) {
+            val toCoin = coin.center - strikerPos
+            if (toCoin.length() < board.strikerRadiusPx * 1.5f) continue
+            val baseDir = toCoin.normalized()
+            for (offsetDeg in aimOffsetsDeg) {
+                val rad = (offsetDeg * PI / 180.0).toFloat()
+                val c = cos(rad)
+                val s = sin(rad)
+                val dir = Point2D(baseDir.x * c - baseDir.y * s, baseDir.x * s + baseDir.y * c).normalized()
+                val ghostBall = coin.center - dir * (board.coinRadiusPx + board.strikerRadiusPx)
+                if (!isInsidePlayableBoard(ghostBall, board, margin = board.strikerRadiusPx * 0.55f)) continue
+                // The striker must reach the coin without clipping another coin.
+                if (!isSegmentClear(
+                        start = strikerPos,
+                        end = ghostBall,
+                        obstacles = obstacles,
+                        excluded = coin,
+                        clearanceRadius = board.coinRadiusPx + board.strikerRadiusPx * 0.88f
+                    )
+                ) {
+                    continue
+                }
+                // The striker must not scratch: at this soft power it stops
+                // at the coin, so the wide-margin follow-through check is
+                // deliberately strict here.
+                if (willStrikerScratchIntoPocket(
+                        strikerPos = strikerPos,
+                        ghostBall = ghostBall,
+                        dirSg = dir,
+                        dirCp = dir,
+                        cutAngleDeg = 0f,
+                        board = board,
+                        extraSafetyMargin = true
+                    )
+                ) {
+                    continue
+                }
+                // The touched coin must not be driven toward a pocket: at
+                // soft power it travels at most ~30% of the board width, so
+                // its ray must stay clear of every pocket over that distance.
+                val coinTravel = board.width * 0.30f
+                val coinEnd = coin.center + dir * coinTravel
+                val coinToPocketClear = board.pockets.none { pocket ->
+                    distancePointToSegment(pocket, coin.center, coinEnd) < board.pocketRadiusPx * 1.6f
+                }
+                if (!coinToPocketClear) continue
+                // Never repeat a learned foul pattern, even for a soft touch.
+                val nearestPocketIdx = board.pockets.indices.minByOrNull { idx ->
+                    (board.pockets[idx] - coin.center).length()
+                } ?: 0
+                val powerStyle = CarromPowerStyle.fromPullMultiplier(SAFETY_SHOT_PULL_MULTIPLIER)
+                if (shotMemory?.isFoulBlacklisted(
+                        board = board,
+                        coinCenter = coin.center,
+                        strikerPos = strikerPos,
+                        pocketIndex = nearestPocketIdx,
+                        cutAngleDeg = 0f,
+                        powerStyle = powerStyle
+                    ) == true
+                ) {
+                    continue
+                }
+                val dragEnd = computeSlingshotDragEnd(
+                    strikerPos = strikerPos,
+                    shotDir = dir,
+                    totalDistance = toCoin.length(),
+                    boardWidth = board.width,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight,
+                    cutAngleDeg = 0f,
+                    powerMultiplier = SAFETY_SHOT_PULL_MULTIPLIER
+                )
+                return CarromShotSolution(
+                    strikerPos = strikerPos,
+                    dragEnd = dragEnd,
+                    ghostBall = ghostBall,
+                    targetCoin = coin,
+                    targetPocket = board.pockets[nearestPocketIdx],
+                    pocketIndex = nearestPocketIdx,
+                    cutAngleDeg = 0f,
+                    isBankShot = false,
+                    isSafetyShot = true,
+                    powerStyle = powerStyle,
+                    confidenceScore = 0.30f,
+                    reason = "Safety shot (no sure pot) — soft touch on ${coin.color.name}, striker parks behind coins",
+                    totalDistance = toCoin.length(),
+                    pullMultiplier = SAFETY_SHOT_PULL_MULTIPLIER
+                )
+            }
+        }
+        return null
+    }
+
+    /**
+     * Deadline fallback (4.5s hard fire deadline): returns ONLY a
+     * physics-verified sure pot, a physics-verified zero-scratch cluster
+     * break (opening cluster only), or a foul-safe safety shot — never a
+     * low-confidence gamble pot. The old guaranteed emergency pot (0.40
+     * confidence, unverified) was removed by the 5s sure-shot / no-foul rule.
      */
     fun solveSafestBreakOrPotShot(
         board: CarromBoardLayout,
@@ -896,7 +1096,10 @@ object CarromGeometrySolver {
             queenPendingCover = queenPendingCover,
             difficulty = difficulty
         )
-        if (inPlaceAttempt != null && !inPlaceAttempt.rejectedDueToCollisionOrFoul) {
+        // Sure shot only: a merely "good-looking" pot (0.42 queen-cover,
+        // 0.50+ combo/direct) is a gamble and must never be fired as the
+        // deadline fallback. Only a physics-verified sure shot qualifies.
+        if (inPlaceAttempt != null && inPlaceAttempt.isSureShot && !inPlaceAttempt.rejectedDueToCollisionOrFoul) {
             return inPlaceAttempt
         }
         val targetPieces = if (isFreestyle) {
@@ -919,94 +1122,29 @@ object CarromGeometrySolver {
             shotMemory = shotMemory,
             isFreestyle = isFreestyle
         )
-        return clusterBreak
-            ?: inPlaceAttempt
-            ?: guaranteeEmergencyShot(
-                board = board,
-                pieces = pieces,
-                myCoinColor = myCoinColor,
-                screenWidth = screenWidth,
-                screenHeight = screenHeight,
-                existingStriker = existingStriker,
-                shotMemory = shotMemory,
-                isFreestyle = isFreestyle
-            )
-    }
-
-    /**
-     * Last-resort guaranteed shot generator so the agent ALWAYS fires inside the 5-second turn clock
-     * whenever at least 1 coin and baseline striker position exist.
-     */
-    fun guaranteeEmergencyShot(
-        board: CarromBoardLayout,
-        pieces: List<CarromPiece>,
-        myCoinColor: CoinColor,
-        screenWidth: Int,
-        screenHeight: Int,
-        existingStriker: CarromPiece?,
-        shotMemory: CarromMemoryData? = null,
-        isFreestyle: Boolean = false
-    ): CarromShotSolution? {
-        if (board.pockets.size < 4) return null
-        val targetPieces = if (isFreestyle) {
-            pieces.filter { it.color != CoinColor.STRIKER }
-        } else {
-            pieces.filter { it.color == myCoinColor || it.color == CoinColor.QUEEN }
-                .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
-        }
-        val anchorCoin = targetPieces.minByOrNull { coin ->
-            board.pockets.minOf { pocket -> (pocket - coin.center).length() }
-        } ?: return null
-
-        val margin = board.strikerRadiusPx * 2.1f
-        val strikerPos = existingStriker?.center?.let {
-            Point2D(it.x.coerceIn(board.left + margin, board.right - margin), it.y)
-        } ?: Point2D(board.left + board.width * 0.5f, board.baselineY)
-
-        val nearestPocketIdx = board.pockets.indices.minByOrNull { idx ->
-            (board.pockets[idx] - anchorCoin.center).length()
+        // A verified zero-scratch break is the right call only while the
+        // cluster is still unbroken (opening): with >= 5 neighbours around
+        // the densest coin the board needs scattering. On a scattered board
+        // a hard break just gifts the opponent an easy pot, so prefer the
+        // safety shot there — the break stays only as a last resort.
+        val maxClusterDensity = targetPieces.maxOfOrNull { candidate ->
+            obstacles.count { other -> (other.center - candidate.center).length() <= board.coinRadiusPx * 4.5f }
         } ?: 0
-        val nearestPocket = board.pockets[nearestPocketIdx]
-        val coinDir = (nearestPocket - anchorCoin.center).normalized()
-        val ghost = anchorCoin.center - coinDir * (board.coinRadiusPx + board.strikerRadiusPx)
-        var rawDir = (ghost - strikerPos).normalized()
-        if (rawDir.length() < 0.05f || rawDir.y > 0.35f) {
-            rawDir = (anchorCoin.center - strikerPos).normalized()
-        }
-        if (rawDir.length() < 0.05f) {
-            rawDir = Point2D(0f, -1f)
-        }
-
-        val cal = shotMemory?.boardCalibration?.takeIf { it.enabled }
-        val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
-        val dragEnd = computeSlingshotDragEnd(
-            strikerPos = strikerPos,
-            shotDir = rawDir,
-            totalDistance = (anchorCoin.center - strikerPos).length().coerceAtLeast(board.width * 0.35f),
-            boardWidth = board.width,
+        val safetyShot = solveSafetyShot(
+            board = board,
+            pieces = pieces,
+            myCoinColor = myCoinColor,
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            cutAngleDeg = 12f,
-            powerMultiplier = (0.94f * matchPowerGain * (cal?.maxPullScale ?: 1.0f)).coerceIn(0.75f, 1.35f),
-            deadzonePx = cal?.slingshotDeadzonePx ?: 22f,
-            curveGamma = cal?.slingshotCurveGamma ?: 1.0f
+            existingStriker = existingStriker,
+            shotMemory = shotMemory,
+            isFreestyle = isFreestyle
         )
-
-        return CarromShotSolution(
-            strikerPos = strikerPos,
-            dragEnd = dragEnd,
-            ghostBall = ghost,
-            targetCoin = anchorCoin,
-            targetPocket = nearestPocket,
-            pocketIndex = nearestPocketIdx,
-            cutAngleDeg = 12f,
-            isBankShot = false,
-            isBreakShot = true,
-            isSureShot = false,
-            powerStyle = CarromPowerStyle.MEDIUM,
-            confidenceScore = 0.40f,
-            reason = "5s Guaranteed Shot -> ${anchorCoin.color.name} (${anchorCoin.center.x.toInt()},${anchorCoin.center.y.toInt()})"
-        )
+        return when {
+            clusterBreak != null && maxClusterDensity >= 5 -> clusterBreak
+            safetyShot != null -> safetyShot
+            else -> clusterBreak
+        }
     }
 
     private fun refineWithPhysicsRollout(
@@ -1107,6 +1245,209 @@ object CarromGeometrySolver {
         )
     }
 
+    /**
+     * Striker sweep (try-and-see aim test, user-asked): for ONE chosen coin
+     * + pocket, try each candidate striker position on the baseline in
+     * turn, simulate the shot (ghost ball + physics rollout), and record
+     * for EACH position whether the coin pots, misses, or risks a
+     * foul/scratch. The live probe loop IS this test: it slides to the
+     * first POTS position and fires. The Aim Lab shows the same table so
+     * the user can see the bot testing positions ("পকেটে যাবে" /
+     * "যাবে না" / "ফাউল ঝুঁকি" per position).
+     *
+     * Cost: one refineWithPhysicsRollout per tried position (~35 rollouts
+     * each). Live play caps at 9 positions (subsampled baseline grid);
+     * the Aim Lab runs the full grid. Run ONCE per turn per (coin,
+     * pocket) and cache — never re-sweep every cycle. With the rollout
+     * setting off, positions with a clean analytic line report POTS at
+     * 0.50 confidence (analytic only, never "sure"); the live loop only
+     * fires on a physics-verified sure solution.
+     */
+    enum class StrikerSweepOutcome { POTS, MISSES, FOUL_RISK }
+
+    data class StrikerSweepEntry(
+        val strikerPos: Point2D,
+        val strikerNormX: Float,
+        val outcome: StrikerSweepOutcome,
+        val solution: CarromShotSolution?,
+        val confidence: Float
+    )
+
+    fun sweepStrikerAim(
+        board: CarromBoardLayout,
+        coin: CarromPiece,
+        pocketIndex: Int,
+        pieces: List<CarromPiece>,
+        myCoinColor: CoinColor,
+        screenWidth: Int,
+        screenHeight: Int,
+        existingStriker: CarromPiece? = null,
+        shotMemory: CarromMemoryData? = null,
+        usePhysicsRollout: Boolean = true,
+        isFreestyle: Boolean = false,
+        maxPositions: Int = 9
+    ): List<StrikerSweepEntry> {
+        if (board.pockets.size < 4) return emptyList()
+        val pocketIdx = pocketIndex.coerceIn(0, 3)
+        val pocket = board.pockets[pocketIdx]
+        val obstacles = pieces.filter { it.color != CoinColor.STRIKER }
+        val allCandidates = buildStrikerCandidates(
+            board = board,
+            obstacles = obstacles,
+            existingStriker = existingStriker,
+            canRepositionStriker = true
+        )
+        if (allCandidates.isEmpty()) return emptyList()
+        // Subsample the baseline grid evenly (left -> right), so the live
+        // sweep stays inside the 5s budget. "First POTS" = leftmost
+        // potting position, matching the probe loop's left-to-right order.
+        val tried = if (maxPositions >= allCandidates.size) {
+            allCandidates.toList()
+        } else {
+            val picked = mutableListOf<Point2D>()
+            val step = allCandidates.size.toFloat() / maxPositions
+            var i = 0f
+            while (picked.size < maxPositions && i < allCandidates.size) {
+                val c = allCandidates[i.toInt()]
+                if (picked.none { kotlin.math.abs(it.x - c.x) < 1f }) picked.add(c)
+                i += step
+            }
+            picked
+        }
+        fun normX(p: Point2D) = ((p.x - board.left) / board.width).coerceIn(0f, 1f)
+
+        val coinToPocket = pocket - coin.center
+        val distCoinPocket = coinToPocket.length()
+        if (distCoinPocket < board.coinRadiusPx * 1.15f) return emptyList()
+        val dirCp = coinToPocket.normalized()
+        val impactDist = board.coinRadiusPx + board.strikerRadiusPx
+        val ghostBall = coin.center - dirCp * impactDist
+        if (!isInsidePlayableBoard(ghostBall, board, margin = board.strikerRadiusPx * 0.55f)) return emptyList()
+        // Pocket path blocked from every striker position: nothing to try.
+        if (!isSegmentClear(
+                start = coin.center,
+                end = pocket,
+                obstacles = obstacles,
+                excluded = coin,
+                clearanceRadius = board.coinRadiusPx * 1.85f
+            )
+        ) {
+            return tried.map { StrikerSweepEntry(it, normX(it), StrikerSweepOutcome.MISSES, null, 0f) }
+        }
+
+        val entries = mutableListOf<StrikerSweepEntry>()
+        for (strikerPos in tried) {
+            val nx = normX(strikerPos)
+            val strikerToGhost = ghostBall - strikerPos
+            val distStrikerGhost = strikerToGhost.length()
+            if (distStrikerGhost < board.strikerRadiusPx * 1.1f) {
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.MISSES, null, 0f))
+                continue
+            }
+            val dirSg = strikerToGhost.normalized()
+            val cosAngle = dirSg.dot(dirCp).coerceIn(-1f, 1f)
+            val cutAngleDeg = (acos(cosAngle) * (180.0 / PI)).toFloat()
+            val isLowerHalfBottomCut = (pocketIdx == 2 || pocketIdx == 3) &&
+                coin.center.y >= board.top + board.height * 0.58f
+            val maxAllowedCut = if (isLowerHalfBottomCut) 72f else 64f
+            if (cutAngleDeg > maxAllowedCut) {
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.MISSES, null, 0f))
+                continue
+            }
+            if (!isSegmentClear(
+                    start = strikerPos,
+                    end = ghostBall,
+                    obstacles = obstacles,
+                    excluded = coin,
+                    clearanceRadius = board.coinRadiusPx + board.strikerRadiusPx * 0.88f
+                )
+            ) {
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.MISSES, null, 0f))
+                continue
+            }
+            val ghostClearRadius = board.coinRadiusPx * 1.2f + board.strikerRadiusPx
+            if (obstacles.any { other ->
+                    other !== coin && (other.center - ghostBall).length() < ghostClearRadius
+                }
+            ) {
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.MISSES, null, 0f))
+                continue
+            }
+            if (willStrikerScratchIntoPocket(
+                    strikerPos = strikerPos,
+                    ghostBall = ghostBall,
+                    dirSg = dirSg,
+                    dirCp = dirCp,
+                    cutAngleDeg = cutAngleDeg,
+                    board = board,
+                    extraSafetyMargin = true
+                )
+            ) {
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.FOUL_RISK, null, 0f))
+                continue
+            }
+            val distRatio = ((distStrikerGhost + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
+            val learnedPowerScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutAngleDeg, distRatio) ?: 1.0f
+            val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
+            val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
+            val baseMult = if (isHanger) 0.85f else 1.0f
+            val effectiveMult = baseMult * learnedPowerScale * matchPowerGain
+            val candPowerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
+            if (shotMemory?.isFoulBlacklisted(
+                    board = board,
+                    coinCenter = coin.center,
+                    strikerPos = strikerPos,
+                    pocketIndex = pocketIdx,
+                    cutAngleDeg = cutAngleDeg,
+                    powerStyle = candPowerStyle
+                ) == true
+            ) {
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.FOUL_RISK, null, 0f))
+                continue
+            }
+            if (!usePhysicsRollout) {
+                // Analytic line only — never "sure" without the rollout.
+                entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.POTS, null, 0.50f))
+                continue
+            }
+            val angleScore = 1f - (cutAngleDeg / 74f) * 0.55f
+            val distScore = 1f - ((distCoinPocket + distStrikerGhost) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
+            val candidate = RolloutCandidate(
+                strikerPos = strikerPos,
+                baseDir = dirSg,
+                ghostBall = ghostBall,
+                targetCoin = coin,
+                targetPocket = pocket,
+                pocketIndex = pocketIdx,
+                cutAngleDeg = cutAngleDeg,
+                isBankShot = false,
+                isComboShot = false,
+                isBreakShot = false,
+                basePullMultiplier = baseMult * learnedPowerScale,
+                staticScore = (angleScore * 0.65f + distScore * 0.35f).coerceIn(0.05f, 1f),
+                totalDistance = distStrikerGhost + distCoinPocket,
+                trainingMatchScore = 0f,
+                collisionRiskPenalty = 0f
+            )
+            val refined = refineWithPhysicsRollout(
+                board = board,
+                pieces = pieces,
+                myCoinColor = myCoinColor,
+                candidates = listOf(candidate),
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                shotMemory = shotMemory,
+                isFreestyle = isFreestyle
+            )
+            when {
+                refined == null -> entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.FOUL_RISK, null, 0f))
+                refined.isSureShot -> entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.POTS, refined, refined.confidenceScore))
+                else -> entries.add(StrikerSweepEntry(strikerPos, nx, StrikerSweepOutcome.MISSES, refined, refined.confidenceScore))
+            }
+        }
+        return entries
+    }
+
     private fun solveOneRailBankShot(
         board: CarromBoardLayout,
         targetPieces: List<CarromPiece>,
@@ -1157,7 +1498,31 @@ object CarromGeometrySolver {
 
                         val bankDistRatio = ((sg.length() + toMirror.length()) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
                         val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg, bankDistRatio) ?: 1.0f
-                        val effectiveMult = 1.24f * learnedScale
+                        // Bank patterns (learned by self-play / live play) feed
+                        // the same blend as direct shots: a matched bank
+                        // pattern lowers the rollout's robustness bar via
+                        // trainingMatchScore and tunes the pull. Banks stay
+                        // capped below direct sure shots (score cap 0.88).
+                        val bankTrainingMatch = shotMemory?.matchCleanShotPattern(
+                            board = board,
+                            strikerPos = strikerPos,
+                            coinCenter = coin.center,
+                            pocketIndex = pocketIdx,
+                            cutAngleDeg = cutDeg,
+                            distRatio = bankDistRatio,
+                            obstacles = obstacles,
+                            targetCoin = coin,
+                            ghostBall = ghostBall,
+                            pocketPos = pocket,
+                            isBankShot = true,
+                            isComboShot = false
+                        )
+                        val bankPatternScale = if (bankTrainingMatch != null) {
+                            (bankTrainingMatch.recommendedPullScale * 0.65f + learnedScale * 0.35f).coerceIn(0.74f, 1.36f)
+                        } else {
+                            learnedScale
+                        }
+                        val effectiveMult = 1.24f * bankPatternScale
                         val bankPowerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
                         if (shotMemory?.isFoulBlacklisted(
                                 board = board,
@@ -1182,7 +1547,7 @@ object CarromGeometrySolver {
                                 else -> 0f
                             }
                         } else 0f
-                        val score = (0.64f - (cutDeg / 66f) * 0.25f + bottomBankBoost + freestyleVal + memoryBias * 0.6f - heatmapPenalty).coerceIn(0.05f, 0.88f)
+                        val score = (0.64f - (cutDeg / 66f) * 0.25f + bottomBankBoost + freestyleVal + memoryBias * 0.6f - heatmapPenalty + (bankTrainingMatch?.matchScore ?: 0f) * 0.08f).coerceIn(0.05f, 0.88f)
 
                         outCandidates?.add(
                             RolloutCandidate(
@@ -1198,7 +1563,8 @@ object CarromGeometrySolver {
                                 isBreakShot = false,
                                 basePullMultiplier = effectiveMult,
                                 staticScore = score,
-                                totalDistance = sg.length() + toMirror.length()
+                                totalDistance = sg.length() + toMirror.length(),
+                                trainingMatchScore = bankTrainingMatch?.matchScore ?: 0f
                             )
                         )
 
@@ -1319,7 +1685,28 @@ object CarromGeometrySolver {
                             continue
                         }
 
-                        val score = (0.61f - (comboCutDeg + entryCutDeg) / 140f).coerceIn(0.45f, 0.65f)
+                        // Combo patterns (self-play / live): a matched pattern
+                        // vouches for the geometry — its score feeds the
+                        // rollout (trainingMatchScore lowers the sure-shot
+                        // robustness bar) and adds a small bonus. Combo power
+                        // stays at the tuned 1.26f: the pattern never re-tunes
+                        // the two-stage energy transfer. Combos stay capped
+                        // below direct sure shots (score cap 0.65).
+                        val comboTrainingMatch = shotMemory?.matchCleanShotPattern(
+                            board = board,
+                            strikerPos = strikerPos,
+                            coinCenter = helperCoin.center,
+                            pocketIndex = pocketIdx,
+                            cutAngleDeg = entryCutDeg,
+                            distRatio = ((sg.length() + distHelper + distPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f),
+                            obstacles = obstacles,
+                            targetCoin = helperCoin,
+                            ghostBall = strikerGhost,
+                            pocketPos = pocket,
+                            isBankShot = false,
+                            isComboShot = true
+                        )
+                        val score = (0.61f - (comboCutDeg + entryCutDeg) / 140f + (comboTrainingMatch?.matchScore ?: 0f) * 0.06f).coerceIn(0.45f, 0.65f)
                         outCandidates?.add(
                             RolloutCandidate(
                                 strikerPos = strikerPos,
@@ -1334,7 +1721,8 @@ object CarromGeometrySolver {
                                 isBreakShot = false,
                                 basePullMultiplier = 1.26f,
                                 staticScore = score,
-                                totalDistance = sg.length() + distHelper + distPocket
+                                totalDistance = sg.length() + distHelper + distPocket,
+                                trainingMatchScore = comboTrainingMatch?.matchScore ?: 0f
                             )
                         )
                         if (bestCombo == null || score > bestCombo.confidenceScore) {

@@ -56,13 +56,21 @@ data class CarromTurnHudState(
  * 1. Scans the board & stabilizes piece coordinates across frames.
  * 2. Holds up to 2 physics + training-ranked baseline X candidate positions.
  * 3. Fuses Training Data (Watch & Play) with Physics Rollout to lock Sure Shots fast.
- * 4. Enforces a strict 3.85s probe cutoff / 5.0s hard deadline so a foul-safe shot ALWAYS fires within 5s.
+ * 4. Enforces a strict 3.4s probe cutoff / 4.5s hard fire deadline / 5.0s
+ *    absolute budget: from turn detection the shot drag MUST start within
+ *    5s. Past 4.5s the bot fires immediately (best sure shot remembered
+ *    so far, else a foul-safe safety shot) with no more probing and no
+ *    pre-shot pause. Only physics-verified sure shots are ever fired as
+ *    pots — never a low-confidence gamble, never a foul-risk shot.
  */
 class CarromTurnMemory {
 
     companion object {
         const val MAX_TURN_BUDGET_MS = 5_000L
-        const val FALLBACK_FIRE_ELAPSED_MS = 3_850L
+        const val FALLBACK_FIRE_ELAPSED_MS = 3_400L
+        // Hard fire deadline: past this elapsed time the current cycle MUST
+        // fire. The remaining 500ms covers the drag dispatch + gesture start.
+        const val SHOT_FIRE_DEADLINE_MS = 4_500L
         const val MAX_BASELINE_PROBES = 2
         private const val LIVE_FIRE_RESERVE_MS = 950L
         private const val A11Y_FIRE_RESERVE_MS = 1_250L
@@ -89,6 +97,40 @@ class CarromTurnMemory {
     private var _sliderMovesThisTurn: Int = 0
     private var bestEvaluatedThisTurn: CarromShotSolution? = null
     private var returnedToBestSpot: Boolean = false
+    // Last full detect+solve cycle duration (ms). A slow device / slow
+    // screenshot pipeline makes each cycle longer than the fixed reserve
+    // assumes, so the reserve must grow with the measured cycle time —
+    // otherwise a probe dispatched "in budget" overruns the 5s deadline
+    // before the next cycle can fire (sim case C4: 1500ms cycles).
+    private var lastCycleDurationMs: Long = 0L
+
+    /**
+     * Record how long the last detect+solve cycle took (screenshot grab
+     * through analyzeAndSolve return). Called by the coordinator once per
+     * cycle, before the probe/fire decision, so canAffordAnotherSliderMove
+     * can refuse a probe the next cycle cannot finish in budget.
+     */
+    fun recordCycleDuration(durationMs: Long) {
+        lastCycleDurationMs = durationMs.coerceAtLeast(0L)
+    }
+
+    /**
+     * True when holding the safety shot for one more cycle still leaves
+     * room to fire within 5s. A WAIT costs a FIXED 1500ms in
+     * GestureExecutor (its waitSeconds is ignored) PLUS one more
+     * detect+solve cycle PLUS the drag dispatch — so the wait is only
+     * affordable when the remaining budget covers all three plus a
+     * 200ms margin. On a slow device the wait is refused and the safety
+     * fires immediately instead; waiting there would push the shot past
+     * 5s (the hard rule outranks waiting for a sure shot).
+     */
+    fun canAffordToWaitForSureShot(nowMs: Long = System.currentTimeMillis()): Boolean {
+        val waitCostMs = 1_500L
+        val nextCycleMs = lastCycleDurationMs.coerceAtLeast(400L)
+        val dispatchReserveMs = 300L
+        val marginMs = 200L
+        return remainingMs(nowMs) > waitCostMs + nextCycleMs + dispatchReserveMs + marginMs
+    }
 
     val sliderMovesThisTurn: Int get() = _sliderMovesThisTurn
     val scanCount: Int get() = scanFrames.size
@@ -116,6 +158,10 @@ class CarromTurnMemory {
     /**
      * True when fewer than 2 slider moves have been dispatched AND there is enough room inside
      * the 5.0s turn window to slide, verify the next frame, and still fire before the 3.85s cutoff.
+     * The reserve is DYNAMIC: it is the larger of the fixed live/a11y
+     * reserve and (last measured cycle duration + 400ms). A probe is only
+     * dispatched when the next cycle can finish inside the budget — a
+     * 1500ms cycle needs a 1900ms reserve, not the fixed 1250ms.
      */
     fun canAffordAnotherSliderMove(
         nowMs: Long = System.currentTimeMillis(),
@@ -125,7 +171,8 @@ class CarromTurnMemory {
         if (_sliderMovesThisTurn >= MAX_BASELINE_PROBES) return false
         val elapsed = elapsedMs(nowMs)
         if (elapsed >= FALLBACK_FIRE_ELAPSED_MS) return false
-        val reserve = if (isLiveStreamActive) LIVE_FIRE_RESERVE_MS else A11Y_FIRE_RESERVE_MS
+        val baseReserve = if (isLiveStreamActive) LIVE_FIRE_RESERVE_MS else A11Y_FIRE_RESERVE_MS
+        val reserve = maxOf(baseReserve, lastCycleDurationMs + 400L)
         return remainingMs(nowMs) > reserve
     }
 
@@ -134,6 +181,32 @@ class CarromTurnMemory {
         isLiveStreamActive: Boolean
     ): Boolean {
         return !canAffordAnotherSliderMove(nowMs, isLiveStreamActive)
+    }
+
+    /**
+     * Hard fire deadline (5s rule): true once the turn clock passes 4.5s.
+     * When true the coordinator must fire on the current cycle — no more
+     * probing, no closed-loop correction, no pre-shot pause.
+     */
+    fun mustFireNow(nowMs: Long = System.currentTimeMillis()): Boolean {
+        return isTurnActive && elapsedMs(nowMs) >= SHOT_FIRE_DEADLINE_MS
+    }
+
+    /**
+     * Best physics-verified sure shot evaluated so far this turn, if any.
+     * A remembered shot is only "sure" from the striker X it was solved
+     * for — if the striker has since moved further than maxShiftPx away,
+     * the solved aim no longer applies and the shot must NOT be re-fired
+     * (firing it from the wrong X would turn a sure shot into a gamble).
+     */
+    fun bestSureShotThisTurn(
+        currentStrikerX: Float? = null,
+        maxShiftPx: Float = Float.MAX_VALUE
+    ): CarromShotSolution? {
+        val best = bestEvaluatedThisTurn ?: return null
+        if (!best.isSureShot || best.rejectedDueToCollisionOrFoul) return null
+        if (currentStrikerX != null && abs(best.strikerPos.x - currentStrikerX) > maxShiftPx) return null
+        return best
     }
 
     fun initializeProbeQueueIfNeeded(spots: List<RankedBaselineSpot>) {
@@ -330,8 +403,12 @@ class CarromTurnMemory {
     }
 
     /**
-     * Deadline fallback (when <=2 probes finish or 5s clock hits ~3.85s):
-     * combines all accumulated Turn Memory frames, Training Data, and Physics Engine to MUST-FIRE a shot.
+     * Deadline fallback (when <=2 probes finish or the 5s clock hits the
+     * 4.5s hard fire deadline): combines all accumulated Turn Memory
+     * frames, Training Data, and Physics Engine to MUST-FIRE a shot.
+     * Sure-shot only: the chain returns a physics-verified sure pot, a
+     * verified zero-scratch break, or a foul-safe safety shot — a
+     * low-confidence pot is NEVER returned here, even as a last resort.
      */
     fun solveCombinedFinalShot(
         board: CarromBoardLayout,
@@ -371,22 +448,31 @@ class CarromTurnMemory {
         )
         if (solved != null) return solved
 
+        // Only a remembered SURE shot may be re-fired — a merely good-looking
+        // remembered pot is a gamble and stays on the shelf.
         val bestRemembered = bestEvaluatedThisTurn?.takeIf {
-            !it.rejectedDueToCollisionOrFoul &&
+            it.isSureShot && !it.rejectedDueToCollisionOrFoul &&
                 abs(it.strikerPos.x - anchorStriker.center.x) <= board.strikerRadiusPx * 1.6f
         }
-        return bestRemembered
-            ?: fallbackSolution
-            ?: CarromGeometrySolver.guaranteeEmergencyShot(
-                board = board,
-                pieces = combinedPieces,
-                myCoinColor = myCoinColor,
-                screenWidth = screenWidth,
-                screenHeight = screenHeight,
-                existingStriker = anchorStriker,
-                shotMemory = shotMemory,
-                isFreestyle = isFreestyle
-            )
+        if (bestRemembered != null) return bestRemembered
+        if (fallbackSolution != null && fallbackSolution.isSureShot &&
+            !fallbackSolution.rejectedDueToCollisionOrFoul
+        ) {
+            return fallbackSolution
+        }
+        // Terminal fallback: a foul-safe safety touch. The old guaranteed
+        // emergency pot (0.40 confidence, unverified) is gone — under the
+        // 5s sure-shot / no-foul rule it must never be fired.
+        return CarromGeometrySolver.solveSafetyShot(
+            board = board,
+            pieces = combinedPieces,
+            myCoinColor = myCoinColor,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            existingStriker = anchorStriker,
+            shotMemory = shotMemory,
+            isFreestyle = isFreestyle
+        )
     }
 
     fun buildHudState(
@@ -447,6 +533,7 @@ class CarromTurnMemory {
     fun formatTurnTelemetry(nowMs: Long, sol: CarromShotSolution): String {
         val sec = elapsedMs(nowMs) / 1000f
         val status = when {
+            sol.isSafetyShot -> "SAFE"
             sol.isTrainingMatched && sol.isSureShot -> "TRAIN-SURE"
             sol.isCollisionAssistedSureShot -> "CAROM-SURE"
             sol.isSureShot -> "SURE"
@@ -475,5 +562,6 @@ class CarromTurnMemory {
         _sliderMovesThisTurn = 0
         bestEvaluatedThisTurn = null
         returnedToBestSpot = false
+        lastCycleDurationMs = 0L
     }
 }

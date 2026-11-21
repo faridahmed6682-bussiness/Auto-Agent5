@@ -7,6 +7,7 @@ import com.example.ai.ApiKeyFailoverManager
 import com.example.ai.GeminiAiPlanner
 import com.example.game.BoardCalibrationProfile
 import com.example.game.BoardPieceCounts
+import com.example.game.BoardProfileMatcher
 import com.example.game.CarromCoachHelper
 import com.example.game.CarromGeometrySolver
 import com.example.game.CarromMemoryData
@@ -18,7 +19,9 @@ import com.example.game.CarromTurnMemory
 import com.example.game.CarromVisionDetector
 import com.example.game.CarromVisionOutcome
 import com.example.game.CarromWatchTrainer
+import com.example.game.SelfPlayConfig
 import com.example.game.CoinColor
+import com.example.game.MissCauseInput
 import com.example.game.PendingCarromShotRecord
 import com.example.game.Point2D
 import com.example.game.TurnProbeStage
@@ -62,6 +65,9 @@ object AgentCoordinator {
     private var actionCacheStore: ActionCacheStore? = null
     private var contactProfileStore: ContactProfileStore? = null
     private var carromShotMemoryStore: CarromShotMemoryStore? = null
+    // Self-play trainer: at most one idle-triggered sweep per app session
+    // (the settings toggle can still trigger a fresh sweep on demand).
+    private var selfPlayRanThisSession = false
     private var settingsCollectJob: Job? = null
     private var playbooksCollectJob: Job? = null
     private var cacheCollectJob: Job? = null
@@ -175,8 +181,19 @@ object AgentCoordinator {
 
     fun updateSettings(transform: (AgentSettings) -> AgentSettings) {
         val store = settingsStore ?: return
+        val before = _settings.value
+        val after = transform(before)
         scope.launch {
             store.updateSettings(transform)
+            // Self-play trainer (settings toggle): the user just turned
+            // training on — run one sweep in the background now, while the
+            // app is idle on the settings screen, so the learned table is
+            // ready before the next match.
+            if (!before.carromSelfPlayEnabled && after.carromSelfPlayEnabled) {
+                carromShotMemoryStore?.runSelfPlayTraining(
+                    SelfPlayConfig(maxShots = after.carromSelfPlayShots)
+                )
+            }
         }
     }
 
@@ -252,7 +269,9 @@ object AgentCoordinator {
     fun saveBoardCalibration(profile: BoardCalibrationProfile) {
         val store = carromShotMemoryStore ?: return
         scope.launch {
-            store.updateBoardCalibration(profile)
+            // Named-profile save: upserts into the profile book and
+            // activates it (solver + learned tables switch to this board).
+            store.saveNamedBoardProfile(profile)
         }
     }
 
@@ -448,6 +467,22 @@ object AgentCoordinator {
                 var lastShotAttemptStrikerX: Float? = null
                 var lastShotPrePieces: List<com.example.game.CarromPiece> = emptyList()
                 var queenPendingCover = false
+                // Fresh-rack latch: set once the board is seen depleted
+                // mid-match, so the next full board is recognised as a NEW
+                // match (per-match calibration reset + profile Auto-Snap).
+                var carromSawDepletedBoard = false
+                // Striker-sweep cache (try-and-see aim test): the sweep
+                // result for one (coin, pocket, board-layout) key. The
+                // key changes whenever any piece moves, so a stale sweep
+                // is never reused; the sweep runs once per layout, not
+                // once per cycle, to stay inside the 5s budget.
+                var carromSweepKey: String? = null
+                var carromSweepEntries: List<CarromGeometrySolver.StrikerSweepEntry> = emptyList()
+                // Miss-cause vision guard: cycles spent waiting for a
+                // 2-frame-stable post-shot detection before recording
+                // the outcome; the pending record is dropped unrecorded
+                // after 5 unstable cycles.
+                var pendingEvalStaleCycles = 0
                 val carromTurnMemory = CarromTurnMemory()
                 val awaitingRepliesByPeer = mutableMapOf<String, ChatTurnGuard.AwaitingReplyState>()
                 var pendingSentTextForPeer: Pair<String, String>? = null
@@ -712,6 +747,32 @@ object AgentCoordinator {
                         }
                     }
                     pendingLauncherStageTag = null
+
+                    // Self-play trainer (idle): the app is sitting on the
+                    // launcher and the user enabled training — run one sweep
+                    // in the background so the learned table fills up without
+                    // ever touching a live match's 5-second budget. Once per
+                    // app session; the settings toggle can trigger more.
+                    if (isOnLauncher && currentSettings.carromSelfPlayEnabled && !selfPlayRanThisSession) {
+                        selfPlayRanThisSession = true
+                        val store = carromShotMemoryStore
+                        if (store != null) {
+                            scope.launch {
+                                val report = store.runSelfPlayTraining(
+                                    SelfPlayConfig(
+                                        profileName = _carromMemory.value.activeBoardProfileName,
+                                        maxShots = currentSettings.carromSelfPlayShots
+                                    )
+                                )
+                                if (report != null) {
+                                    lastOutcomeHint = "[Self-Play] Trained ${report.shotsRun} shots " +
+                                        "(${report.sureShotsFound} sure, ${report.bankSureShotsFound} bank, " +
+                                        "${report.comboSureShotsFound} combo) on '${report.profileName}' " +
+                                        "in ${report.elapsedMs}ms. $lastOutcomeHint"
+                                }
+                            }
+                        }
+                    }
 
                     val interactiveNodeCount = snapshot.nodes.count { it.isClickable || it.isEditable }
                     val isNonGameApp = snapshot.packageName == selfPkg ||
@@ -1151,6 +1212,63 @@ object AgentCoordinator {
                                 difficulty = currentSettings.carromDifficulty
                             )
 
+                            // 5s rule (Fix 1): measure this detect+solve
+                            // cycle so the probe-affordability reserve
+                            // grows with the REAL cycle time — a probe is
+                            // only dispatched when the next cycle can
+                            // finish inside the 5s budget.
+                            carromTurnMemory.recordCycleDuration(System.currentTimeMillis() - nowCarromMs)
+
+                            // New-match detection (fresh rack): the board is
+                            // full again (9+9+1 = 19 coins; >= 18 tolerates
+                            // one detection miss) after having been seen
+                            // depleted, and shots were played in the previous
+                            // match. Two things happen, once per match:
+                            // 1. Per-match calibration resets (friction /
+                            //    power / jaw buffer / slider gain back to
+                            //    neutral) so the previous board's tuning
+                            //    never leaks into the new board.
+                            // 2. Auto-Snap profile match: the live board
+                            //    geometry is matched against the saved named
+                            //    profiles; a matching board is activated
+                            //    (its own learned table + calibration).
+                            //    A board that matches NOTHING keeps
+                            //    auto-detection — never a wrong profile.
+                            val outcomePieces = when (outcome) {
+                                is CarromVisionOutcome.SolvedShot -> outcome.boardPieces
+                                is CarromVisionOutcome.WaitStillnessOrTurn -> outcome.boardPieces
+                                is CarromVisionOutcome.NeedsAiVision -> outcome.boardPieces
+                            }
+                            val totalCoinsOnBoard = outcomePieces.count { it.color != CoinColor.STRIKER }
+                            if (totalCoinsOnBoard >= 18) {
+                                if (currentCarromMem.matchCalibration.shotsThisMatch > 0 && carromSawDepletedBoard) {
+                                    carromSawDepletedBoard = false
+                                    queenPendingCover = false
+                                    val liveGeometry = snapshot.screenshot?.let { bitmap ->
+                                        runCatching {
+                                            CarromVisionDetector.autoDetectCalibrationFromBitmap(bitmap)
+                                        }.getOrNull()
+                                    }
+                                    val matchedProfile = liveGeometry?.let {
+                                        BoardProfileMatcher.matchProfile(it, currentCarromMem.boardProfiles)
+                                    }
+                                    val store = carromShotMemoryStore
+                                    if (store != null) {
+                                        scope.launch {
+                                            if (matchedProfile != null &&
+                                                matchedProfile.profile.profileName != currentCarromMem.activeBoardProfileName
+                                            ) {
+                                                store.activateBoardProfile(matchedProfile.profile.profileName)
+                                            } else {
+                                                store.resetMatchCalibration()
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (totalCoinsOnBoard in 1..17) {
+                                carromSawDepletedBoard = true
+                            }
+
                             // Evaluate the previous Carrom shot once coins have stopped moving
                             val isMovingWait = outcome is CarromVisionOutcome.WaitStillnessOrTurn &&
                                 outcome.reason.contains("motion", ignoreCase = true)
@@ -1194,29 +1312,89 @@ object AgentCoordinator {
                                     lastShotAttemptStrikerX = null
                                     lastShotPrePieces = emptyList()
                                     if (postCounts != null) {
-                                        val eval = carromShotMemoryStore?.recordShotOutcome(prevShot, postCounts)
-                                        pendingCarromShot = null
-                                        if (eval?.outcomeType == CarromShotOutcomeType.POCKETED_QUEEN &&
-                                            !prevShot.isFreestyle &&
-                                            postCounts.myCount > 0
-                                        ) {
-                                            queenPendingCover = true
+                                        // Vision-error guard (miss-cause
+                                        // learning): record the outcome only
+                                        // when the post-shot detection is
+                                        // stable across 2 frames — an
+                                        // unstable detection would corrupt
+                                        // the learned table with wrong
+                                        // counts. Retried next cycle (off
+                                        // the turn clock, never delaying
+                                        // the next shot's 5s window);
+                                        // dropped unrecorded after 5
+                                        // unstable cycles.
+                                        val postStable = CarromVisionDetector.isDetectionStableAcrossTwoFrames
+                                        if (!postStable) {
+                                            pendingEvalStaleCycles++
+                                            if (pendingEvalStaleCycles > 5) {
+                                                pendingCarromShot = null
+                                                pendingEvalStaleCycles = 0
+                                                lastOutcomeHint = "[Carrom outcome not recorded — vision never stabilised across 2 frames] $lastOutcomeHint"
+                                            }
                                         } else {
-                                            queenPendingCover = false
-                                        }
-                                        if (eval != null) {
-                                            lastOutcomeHint = "${eval.summaryMessage} $lastOutcomeHint"
-                                            workingMemory = eval.summaryMessage
-                                            if (eval.learnedTacticLesson != null || eval.learnedFoulLesson != null) {
-                                                val pbKey = activePlaybook?.topicKey ?: "carrom_board_game"
-                                                val updatedPb = knowledgeStore?.recordStepLearning(
-                                                    topicKey = pbKey,
-                                                    fallbackTopicTitle = activePlaybook?.topicTitle ?: "Carrom Board Game",
-                                                    newStrategy = eval.learnedTacticLesson,
-                                                    newFoulLesson = eval.learnedFoulLesson
-                                                )
-                                                if (updatedPb != null) {
-                                                    activePlaybook = updatedPb
+                                            pendingEvalStaleCycles = 0
+                                            // Miss-cause geometry: only when
+                                            // the pre-shot detection was ALSO
+                                            // stable across 2 frames (frozen
+                                            // in the record at fire time) and
+                                            // this outcome carries the board.
+                                            // Otherwise counts-only recording
+                                            // (coarse rules, UNKNOWN cause).
+                                            val missInput: MissCauseInput? =
+                                                if (prevShot.hasSolverGeometry && prevShot.preDetectionStable &&
+                                                    outcome is CarromVisionOutcome.SolvedShot && settledPieces.isNotEmpty()
+                                                ) {
+                                                    val board = outcome.board
+                                                    val prePx = Point2D(
+                                                        board.left + prevShot.coinNormX * board.width,
+                                                        board.top + prevShot.coinNormY * board.height
+                                                    )
+                                                    val postPiece = settledPieces
+                                                        .filter { it.color == prevShot.targetCoinColor }
+                                                        .minByOrNull { kotlin.math.hypot(it.center.x - prePx.x, it.center.y - prePx.y) }
+                                                        ?.takeIf { kotlin.math.hypot(it.center.x - prePx.x, it.center.y - prePx.y) <= board.width * 0.25f }
+                                                    val postNorm = postPiece?.let {
+                                                        Point2D(
+                                                            ((it.center.x - board.left) / board.width).coerceIn(0f, 1f),
+                                                            ((it.center.y - board.top) / board.height).coerceIn(0f, 1f)
+                                                        )
+                                                    }
+                                                    val pocketPx = board.pockets[prevShot.pocketIndex.coerceIn(0, 3)]
+                                                    MissCauseInput(
+                                                        preCoinNorm = Point2D(prevShot.coinNormX, prevShot.coinNormY),
+                                                        postCoinNorm = postNorm,
+                                                        pocketNorm = Point2D(
+                                                            ((pocketPx.x - board.left) / board.width).coerceIn(0f, 1f),
+                                                            ((pocketPx.y - board.top) / board.height).coerceIn(0f, 1f)
+                                                        ),
+                                                        coinRadiusNorm = (board.coinRadiusPx / board.width).coerceAtLeast(0.005f),
+                                                        pocketRadiusNorm = (board.pocketRadiusPx / board.width).coerceAtLeast(0.005f)
+                                                    )
+                                                } else null
+                                            val eval = carromShotMemoryStore?.recordShotOutcome(prevShot, postCounts, missCauseInput = missInput)
+                                            pendingCarromShot = null
+                                            if (eval?.outcomeType == CarromShotOutcomeType.POCKETED_QUEEN &&
+                                                !prevShot.isFreestyle &&
+                                                postCounts.myCount > 0
+                                            ) {
+                                                queenPendingCover = true
+                                            } else {
+                                                queenPendingCover = false
+                                            }
+                                            if (eval != null) {
+                                                lastOutcomeHint = "${eval.summaryMessage} $lastOutcomeHint"
+                                                workingMemory = eval.summaryMessage
+                                                if (eval.learnedTacticLesson != null || eval.learnedFoulLesson != null) {
+                                                    val pbKey = activePlaybook?.topicKey ?: "carrom_board_game"
+                                                    val updatedPb = knowledgeStore?.recordStepLearning(
+                                                        topicKey = pbKey,
+                                                        fallbackTopicTitle = activePlaybook?.topicTitle ?: "Carrom Board Game",
+                                                        newStrategy = eval.learnedTacticLesson,
+                                                        newFoulLesson = eval.learnedFoulLesson
+                                                    )
+                                                    if (updatedPb != null) {
+                                                        activePlaybook = updatedPb
+                                                    }
                                                 }
                                             }
                                         }
@@ -1315,6 +1493,12 @@ object AgentCoordinator {
                                         observedSliderGain = observedGainThisStep
                                     )
 
+                                    // 5s hard rule: once the turn clock passes 4.5s, no more
+                                    // probing or correcting — this cycle MUST fire (best sure
+                                    // shot remembered so far, else a foul-safe safety shot),
+                                    // with no pre-shot pause.
+                                    val deadlineFire = carromTurnMemory.mustFireNow(nowCarromMs)
+
                                     val consensusPieces = carromTurnMemory.buildConsensusPieces(
                                         latestPieces = outcome.boardPieces,
                                         coinRadiusPx = outcome.board.coinRadiusPx
@@ -1370,7 +1554,8 @@ object AgentCoordinator {
                                     val isVerifiedSureHere = inPlaceSol != null && inPlaceSol.isSureShot
 
                                     val minCorrectionPx = (outcome.board.width * 0.032f).coerceIn(18f, 34f)
-                                    val needsClosedLoopCorrection = !isVerifiedSureHere &&
+                                    val needsClosedLoopCorrection = !deadlineFire &&
+                                        !isVerifiedSureHere &&
                                         canAffordSlide &&
                                         carromTurnMemory.remainingMs(nowCarromMs) > 2_300L &&
                                         currentSettings.useClosedLoopSliderVerify &&
@@ -1380,9 +1565,57 @@ object AgentCoordinator {
                                         kotlin.math.abs(verifyState.targetStrikerX - striker.center.x) > minCorrectionPx &&
                                         !carromTurnMemory.isSliderStalledOrOscillating(verifyState.targetStrikerX, striker.center.x)
 
+                                    // Striker sweep (try-and-see): simulate
+                                    // every baseline position for the current
+                                    // best coin+pocket, once per board layout
+                                    // (key changes when any piece moves).
+                                    // The probe step IS this test — slide to
+                                    // the first position that pots with sure
+                                    // confidence; fall back to the next
+                                    // untested probe spot when none pots.
+                                    var sweepFirstPotsX: Float? = null
+                                    var sweepHudLine: String? = null
+                                    if (!deadlineFire && !isVerifiedSureHere && !needsClosedLoopCorrection && striker != null && outcome.solution != null) {
+                                        val sweepKey = buildString {
+                                            val sol = outcome.solution
+                                            append(sol.targetCoin.center.x.toInt()); append(','); append(sol.targetCoin.center.y.toInt())
+                                            append('|'); append(sol.pocketIndex)
+                                            fusedPiecesWithStriker.sortedBy { it.center.x }.forEach { p ->
+                                                append('|'); append(p.center.x.toInt()); append(':'); append(p.center.y.toInt())
+                                            }
+                                        }
+                                        if (sweepKey != carromSweepKey) {
+                                            carromSweepKey = sweepKey
+                                            carromSweepEntries = CarromGeometrySolver.sweepStrikerAim(
+                                                board = outcome.board,
+                                                coin = outcome.solution.targetCoin,
+                                                pocketIndex = outcome.solution.pocketIndex,
+                                                pieces = fusedPiecesWithStriker,
+                                                myCoinColor = myCarromCoinColor,
+                                                screenWidth = snapshot.screenWidth,
+                                                screenHeight = snapshot.screenHeight,
+                                                existingStriker = striker,
+                                                shotMemory = currentCarromMem,
+                                                usePhysicsRollout = currentSettings.usePhysicsRollout,
+                                                isFreestyle = isFreestyleMode,
+                                                maxPositions = 9
+                                            )
+                                        }
+                                        if (carromSweepEntries.isNotEmpty()) {
+                                            val pots = carromSweepEntries.filter {
+                                                it.outcome == CarromGeometrySolver.StrikerSweepOutcome.POTS && it.solution?.isSureShot == true
+                                            }
+                                            sweepFirstPotsX = pots.firstOrNull()?.strikerPos?.x
+                                            val potsXs = pots.joinToString(",") { ((it.strikerNormX * 100).toInt()).toString() }
+                                            val missN = carromSweepEntries.count { it.outcome == CarromGeometrySolver.StrikerSweepOutcome.MISSES }
+                                            val foulN = carromSweepEntries.count { it.outcome == CarromGeometrySolver.StrikerSweepOutcome.FOUL_RISK }
+                                            sweepHudLine = "সুইপ ${carromSweepEntries.size}টি: পকেটে যাবে ${potsXs.ifEmpty { "—" }} • যাবে না $missN • ফাউল-ঝুঁকি $foulN"
+                                        }
+                                    }
+
                                     var nextProbeTargetX: Float? = null
                                     var returningToBestProbe = false
-                                    if (!isVerifiedSureHere && !needsClosedLoopCorrection && striker != null) {
+                                    if (!deadlineFire && !isVerifiedSureHere && !needsClosedLoopCorrection && striker != null) {
                                         // Reject current spot because collision missed/fouled or no Sure Shot found here
                                         val rejectWhy = when {
                                             inPlaceSol == null -> "no-line"
@@ -1391,7 +1624,12 @@ object AgentCoordinator {
                                         }
                                         carromTurnMemory.markSpotRejected(striker.center.x, rejectWhy)
                                         if (canAffordSlide) {
-                                            nextProbeTargetX = carromTurnMemory.nextUntestedProbeSpot(striker.center.x)?.strikerX
+                                            // Sweep first: the first striker
+                                            // position that pots with sure
+                                            // confidence wins; otherwise the
+                                            // next untested probe spot.
+                                            nextProbeTargetX = sweepFirstPotsX
+                                                ?: carromTurnMemory.nextUntestedProbeSpot(striker.center.x)?.strikerX
                                             if (nextProbeTargetX == null) {
                                                 val returnX = carromTurnMemory.bestEvaluatedSpotToReturnTo(
                                                     currentStrikerX = striker.center.x,
@@ -1439,7 +1677,8 @@ object AgentCoordinator {
                                         )
                                         val remSec = carromTurnMemory.remainingMs(nowCarromMs) / 1000f
                                         val previewSol = inPlaceSol ?: outcome.solution
-                                        val previewAim = "${previewSol.targetCoin.color.name} -> ${CarromMemoryData.pocketName(previewSol.pocketIndex)} (${previewSol.cutAngleDeg.toInt()}°)"
+                                        val previewAim = "${previewSol.targetCoin.color.name} -> ${CarromMemoryData.pocketName(previewSol.pocketIndex)} (${previewSol.cutAngleDeg.toInt()}°)" +
+                                            (sweepHudLine?.let { " • $it" } ?: "")
                                         _carromTurnHud.value = carromTurnMemory.buildHudState(
                                             nowMs = nowCarromMs,
                                             stage = TurnProbeStage.PROBING_SLIDER,
@@ -1468,13 +1707,49 @@ object AgentCoordinator {
                                             requiresConfirmation = false
                                         )
                                     } else {
-                                        // Step 3: Either Sure Shot is LOCKED (including clean carom pots) OR <=7 probes/8.5s fallback triggers!
+                                        // Step 3: Sure Shot LOCKED (including clean carom pots),
+                                        // or the 4.5s hard fire deadline (best sure shot
+                                        // remembered, else a foul-safe safety shot), or the
+                                        // strict deadline fallback (sure / break / safety only).
                                         pendingSliderVerify = null
                                         val didSlideBeforeThisShot = movedStrikerThisTurn
                                         movedStrikerThisTurn = false
 
                                         val finalSol = if (isVerifiedSureHere && inPlaceSol != null) {
                                             inPlaceSol
+                                        } else if (deadlineFire) {
+                                            // Past the 4.5s fire deadline: do NOT re-solve (that
+                                            // costs time) — fire the best sure shot remembered
+                                            // from this turn, else a foul-safe safety shot.
+                                            // Never a low-confidence gamble pot.
+                                            carromTurnMemory.bestSureShotThisTurn(
+                                                currentStrikerX = striker?.center?.x,
+                                                maxShiftPx = outcome.board.strikerRadiusPx * 1.6f
+                                            )
+                                                ?: CarromGeometrySolver.solveSafetyShot(
+                                                    board = outcome.board,
+                                                    pieces = outcome.boardPieces,
+                                                    myCoinColor = myCarromCoinColor,
+                                                    screenWidth = snapshot.screenWidth,
+                                                    screenHeight = snapshot.screenHeight,
+                                                    existingStriker = striker,
+                                                    shotMemory = currentCarromMem,
+                                                    isFreestyle = isFreestyleMode
+                                                )
+                                                ?: carromTurnMemory.solveCombinedFinalShot(
+                                                    board = outcome.board,
+                                                    latestPieces = outcome.boardPieces,
+                                                    striker = striker,
+                                                    myCoinColor = myCarromCoinColor,
+                                                    screenWidth = snapshot.screenWidth,
+                                                    screenHeight = snapshot.screenHeight,
+                                                    shotMemory = currentCarromMem,
+                                                    usePhysicsRollout = currentSettings.usePhysicsRollout,
+                                                    fallbackSolution = outcome.solution,
+                                                    isFreestyle = isFreestyleMode,
+                                                    queenPendingCover = queenPendingCover,
+                                                    difficulty = currentSettings.carromDifficulty
+                                                ) ?: outcome.solution
                                         } else {
                                             carromTurnMemory.solveCombinedFinalShot(
                                                 board = outcome.board,
@@ -1489,7 +1764,17 @@ object AgentCoordinator {
                                                 isFreestyle = isFreestyleMode,
                                                 queenPendingCover = queenPendingCover,
                                                 difficulty = currentSettings.carromDifficulty
-                                            ) ?: outcome.solution
+                                            ) ?: outcome.solution.takeIf { it.isSureShot }
+                                                ?: CarromGeometrySolver.solveSafetyShot(
+                                                    board = outcome.board,
+                                                    pieces = outcome.boardPieces,
+                                                    myCoinColor = myCarromCoinColor,
+                                                    screenWidth = snapshot.screenWidth,
+                                                    screenHeight = snapshot.screenHeight,
+                                                    existingStriker = striker,
+                                                    shotMemory = currentCarromMem,
+                                                    isFreestyle = isFreestyleMode
+                                                ) ?: outcome.solution
                                         }
 
                                         val hudStage = when {
@@ -1524,7 +1809,10 @@ object AgentCoordinator {
                                             ((kotlin.math.hypot(finalSol.ghostBall.x - shootStartX, finalSol.ghostBall.y - shootStartY) +
                                                 kotlin.math.hypot(finalSol.targetPocket.x - finalSol.targetCoin.center.x, finalSol.targetPocket.y - finalSol.targetCoin.center.y)) / outcome.board.width).coerceIn(0.15f, 1.8f)
                                         }
-                                        if (countSource.isNotEmpty()) {
+                                        // Safety touches are deliberate non-scoring moves: never
+                                        // record them as pot attempts, or the memory would learn
+                                        // that a soft touch "misses" its pocket.
+                                        if (countSource.isNotEmpty() && !finalSol.isSafetyShot) {
                                             nextPendingCarromShotCandidate = PendingCarromShotRecord(
                                                 myCoinColor = myCarromCoinColor,
                                                 targetCoinColor = finalSol.targetCoin.color,
@@ -1543,16 +1831,27 @@ object AgentCoordinator {
                                                 coinNormX = shotCoinNormX,
                                                 coinNormY = shotCoinNormY,
                                                 distRatio = shotDistRatio,
-                                                observedPullScale = finalSol.pullMultiplier
+                                                observedPullScale = finalSol.pullMultiplier,
+                                                // Vision-error guard: freeze
+                                                // whether the pre-shot
+                                                // detection was stable across
+                                                // 2 frames, so the miss-cause
+                                                // classifier only trusts
+                                                // geometry from a stable
+                                                // pre-shot board.
+                                                preDetectionStable = CarromVisionDetector.isDetectionStableAcrossTwoFrames,
+                                                hasSolverGeometry = true
                                             )
                                         }
 
                                         val rawDx = finalSol.dragEnd.x - finalSol.strikerPos.x
                                         val rawDy = finalSol.dragEnd.y - finalSol.strikerPos.y
-                                        // Difficulty aim error: on Easy/Medium the pull vector is
-                                        // rotated by a small random angle so the play looks
-                                        // human; Hard adds no error.
-                                        val aimErrDeg = currentSettings.carromDifficulty.aimErrorDeg
+                                        // 5s sure-shot / no-foul rule: never rotate a
+                                        // physics-verified shot's aim — even a 1.5-3 deg error
+                                        // can turn a sure shot into a miss or a foul.
+                                        // Human-likeness comes from timing jitter only;
+                                        // difficulty still gates which shots are accepted.
+                                        val aimErrDeg = 0f
                                         val (dx, dy) = if (aimErrDeg > 0f) {
                                             val errRad = Math.toRadians((Random.Default.nextFloat() * 2f * aimErrDeg - aimErrDeg).toDouble()).toFloat()
                                             val c = kotlin.math.cos(errRad)
@@ -1593,12 +1892,23 @@ object AgentCoordinator {
                                             aimSummary = finalAimSummary
                                         )
 
-                                        // Human-like pre-shot pause (0.4-1.2s) when the turn
-                                        // clock allows it; skipped when time is short or this
-                                        // is the must-shoot fallback. Captured before resetTurn.
+                                        // Early-fire rule (user correction 2026-11-21):
+                                        // 5s is only the MAXIMUM deadline, never a
+                                        // waiting period. A physics-verified sure
+                                        // shot fires the moment it is found — no
+                                        // artificial delay. The human-like pre-shot
+                                        // pause (0.4-1.2s) is therefore SKIPPED for
+                                        // sure shots; it only ever applied to
+                                        // fallback shots, which fire at/near the
+                                        // deadline where the pause is 0 anyway.
+                                        // Human-likeness now comes only from the
+                                        // drag-duration jitter below. Bound the
+                                        // pause inside the 5s budget: always leave
+                                        // >= 1500ms for the drag dispatch + gesture start.
                                         val remainingBeforeShotMs = carromTurnMemory.remainingMs(nowCarromMs)
-                                        val humanPauseMs = if (remainingBeforeShotMs > 2_500L && hudStage != TurnProbeStage.FALLBACK_FIRE) {
+                                        val humanPauseMs = if (!finalSol.isSureShot && remainingBeforeShotMs > 2_500L && hudStage != TurnProbeStage.FALLBACK_FIRE && !deadlineFire) {
                                             Random.Default.nextLong(400L, 1_201L)
+                                                .coerceAtMost((remainingBeforeShotMs - 1_500L).coerceAtLeast(0L))
                                         } else {
                                             0L
                                         }
@@ -1619,9 +1929,45 @@ object AgentCoordinator {
                                             2 -> (baseDurationMs + 100L).coerceAtMost(620L)
                                             else -> baseDurationMs
                                         } + humanJitterMs).coerceIn(340L, 640L)
-                                        if (humanPauseMs > 0L) delay(humanPauseMs)
-                                        PlannedAction(
-                                            actionType = AgentActionType.DRAG,
+                                        if (!deadlineFire && finalSol.isSafetyShot && carromTurnMemory.canAffordToWaitForSureShot(nowCarromMs)) {
+                                            // 5s rule (Fix 2): a safety shot is only
+                                            // the DEADLINE fallback. Before the 4.5s
+                                            // deadline, HOLD it and wait one more
+                                            // cycle when the wait still fits — a sure
+                                            // shot may still arrive inside the
+                                            // budget (sim case D3). No pre-shot
+                                            // pause on the wait path; the deadline
+                                            // path below still fires the safety at
+                                            // 4.5s. The wait is gated: a WAIT costs
+                                            // a fixed 1500ms in GestureExecutor plus
+                                            // one more detect+solve cycle, so on a
+                                            // slow device the safety fires now
+                                            // instead of waiting past 5s (sim D2).
+                                            _carromTurnHud.value = carromTurnMemory.buildHudState(
+                                                nowMs = nowCarromMs,
+                                                stage = TurnProbeStage.WAITING,
+                                                detail = "No sure shot yet — waiting for one (safety held for deadline)",
+                                                board = outcome.board,
+                                                tracedPieces = fusedPiecesWithStriker,
+                                                strikerPos = Point2D(shootStartX, shootStartY),
+                                                solution = finalSol,
+                                                aimSummary = finalAimSummary
+                                            )
+                                            PlannedAction(
+                                                actionType = AgentActionType.WAIT,
+                                                targetNodeId = null,
+                                                x = null,
+                                                y = null,
+                                                textToType = null,
+                                                waitSeconds = 1,
+                                                memoryNote = null,
+                                                reason = "No sure shot yet — holding the safety shot for the 4.5s deadline.",
+                                                requiresConfirmation = false
+                                            )
+                                        } else {
+                                            if (humanPauseMs > 0L) delay(humanPauseMs)
+                                            PlannedAction(
+                                                actionType = AgentActionType.DRAG,
                                             targetNodeId = null,
                                             x = shootStartX.toInt(),
                                             y = shootStartY.toInt(),
@@ -1634,6 +1980,7 @@ object AgentCoordinator {
                                             reason = "Zero-API Carrom $modeTag $telemetry: ${finalSol.reason} (conf=${(finalSol.confidenceScore * 100).toInt()}%)",
                                             requiresConfirmation = false
                                         )
+                                        }
                                     }
                                 }
                                 is CarromVisionOutcome.NeedsAiVision -> {
@@ -2096,6 +2443,7 @@ object AgentCoordinator {
                     if (execResult.success) {
                         if (nextPendingCarromShotCandidate != null) {
                             pendingCarromShot = nextPendingCarromShotCandidate
+                            pendingEvalStaleCycles = 0
                         } else if (isCarromContext &&
                             aiPreCarromCounts != null &&
                             plannedAction.actionType == AgentActionType.DRAG &&

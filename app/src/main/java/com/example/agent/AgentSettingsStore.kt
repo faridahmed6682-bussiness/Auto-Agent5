@@ -36,6 +36,8 @@ class AgentSettingsStore(private val context: Context) {
         val CARROM_PRECISION_SOLVER = booleanPreferencesKey("carrom_precision_solver")
         val CARROM_RULE_MODE = stringPreferencesKey("carrom_rule_mode")
         val CARROM_DIFFICULTY = stringPreferencesKey("carrom_difficulty")
+        val CARROM_SELF_PLAY_ENABLED = booleanPreferencesKey("carrom_self_play_enabled")
+        val CARROM_SELF_PLAY_SHOTS = intPreferencesKey("carrom_self_play_shots")
         val USE_PHYSICS_ROLLOUT = booleanPreferencesKey("use_physics_rollout")
         val USE_SUBPIXEL_CIRCLE_REFINEMENT = booleanPreferencesKey("use_subpixel_circle_refinement")
         val USE_CLOSED_LOOP_SLIDER_VERIFY = booleanPreferencesKey("use_closed_loop_slider_verify")
@@ -81,6 +83,8 @@ class AgentSettingsStore(private val context: Context) {
             prefs[Keys.CARROM_PRECISION_SOLVER] = updated.carromPrecisionSolver
             prefs[Keys.CARROM_RULE_MODE] = updated.carromRuleMode.name
             prefs[Keys.CARROM_DIFFICULTY] = updated.carromDifficulty.name
+            prefs[Keys.CARROM_SELF_PLAY_ENABLED] = updated.carromSelfPlayEnabled
+            prefs[Keys.CARROM_SELF_PLAY_SHOTS] = updated.carromSelfPlayShots.coerceIn(24, 480)
             prefs[Keys.USE_PHYSICS_ROLLOUT] = updated.usePhysicsRollout
             prefs[Keys.USE_SUBPIXEL_CIRCLE_REFINEMENT] = updated.useSubPixelCircleRefinement
             prefs[Keys.USE_CLOSED_LOOP_SLIDER_VERIFY] = updated.useClosedLoopSliderVerify
@@ -147,6 +151,8 @@ class AgentSettingsStore(private val context: Context) {
             carromPrecisionSolver = prefs[Keys.CARROM_PRECISION_SOLVER] ?: true,
             carromRuleMode = carromRuleMode,
             carromDifficulty = carromDifficulty,
+            carromSelfPlayEnabled = prefs[Keys.CARROM_SELF_PLAY_ENABLED] ?: false,
+            carromSelfPlayShots = (prefs[Keys.CARROM_SELF_PLAY_SHOTS] ?: 120).coerceIn(24, 480),
             usePhysicsRollout = prefs[Keys.USE_PHYSICS_ROLLOUT] ?: true,
             useSubPixelCircleRefinement = prefs[Keys.USE_SUBPIXEL_CIRCLE_REFINEMENT] ?: true,
             useClosedLoopSliderVerify = prefs[Keys.USE_CLOSED_LOOP_SLIDER_VERIFY] ?: true,

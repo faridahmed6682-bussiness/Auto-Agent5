@@ -411,6 +411,11 @@ data class AgentSettings(
     val carromPrecisionSolver: Boolean = true,
     val carromRuleMode: CarromRuleMode = CarromRuleMode.FREESTYLE,
     val carromDifficulty: CarromDifficulty = CarromDifficulty.MEDIUM,
+    // Self-play trainer: when on, one offline sweep runs while the app is
+    // idle (launcher / settings screen) so the learned sure-shot table is
+    // ready before the next match. Shots per sweep (direct + bank + combo).
+    val carromSelfPlayEnabled: Boolean = false,
+    val carromSelfPlayShots: Int = 120,
     val usePhysicsRollout: Boolean = true,
     val useSubPixelCircleRefinement: Boolean = true,
     val useClosedLoopSliderVerify: Boolean = true,

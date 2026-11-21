@@ -2638,6 +2638,21 @@ fun AgentSettingsSheet(
                 color = TextSecondary
             )
 
+            // Self-play trainer: one offline sweep runs while the app is
+            // idle (launcher / settings), simulating shots through the
+            // physics rollout and remembering which pocket/angle/power
+            // combinations pot — so live matches can look up a sure shot
+            // inside the 5-second budget instead of computing from scratch.
+            SettingSwitchRow(
+                title = "Self-Play Trainer",
+                subtitle = "Simulate shots offline when idle and learn sure shots per board. Runs once when turned on, then while idle on the launcher.",
+                checked = settings.carromSelfPlayEnabled,
+                testTag = "switch_carrom_self_play",
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(carromSelfPlayEnabled = enabled) }
+                }
+            )
+
             SettingSwitchRow(
                 title = stringResource(R.string.settings_physics_rollout_label),
                 subtitle = stringResource(R.string.settings_physics_rollout_desc),

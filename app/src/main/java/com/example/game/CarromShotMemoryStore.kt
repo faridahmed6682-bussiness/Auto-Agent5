@@ -224,7 +224,14 @@ data class CleanShotPattern(
     val minCorridorClearanceRadii: Float = 3.5f,
     val wasCollisionAssisted: Boolean = false,
     val successCount: Int = 1,
-    val lastUsedMs: Long = 0L
+    val lastUsedMs: Long = 0L,
+    // Shot kind: a bank pot must never be matched as a direct pot (and vice
+    // versa) — the geometry looks similar but the physics is different.
+    val isBankShot: Boolean = false,
+    val isComboShot: Boolean = false,
+    // Board profile this pattern was learned on ("" = global / learned
+    // before profiles existed). Patterns only match on their own board.
+    val profileName: String = ""
 )
 
 data class CollisionRiskPattern(
@@ -261,6 +268,18 @@ data class CarromMemoryData(
     val cleanShotPatterns: List<CleanShotPattern> = emptyList(),
     val collisionRisks: List<CollisionRiskPattern> = emptyList(),
     val boardCalibration: BoardCalibrationProfile = BoardCalibrationProfile(),
+    // Named board profiles saved from the Board Calibration & Aim Lab
+    // (screenshot + pocket alignment + colour picking + Test Aim).
+    // boardCalibration above is the ACTIVE profile (for backwards compat).
+    val boardProfiles: List<BoardCalibrationProfile> = emptyList(),
+    val activeBoardProfileName: String = "",
+    // Learned shot table PER board profile: profile name -> (bucket key ->
+    // stats). A shot that was sure on one board's friction is never trusted
+    // blindly on another board — each board learns its own table, and the
+    // live match calibration still scales power/confidence at shot time.
+    val profileStats: Map<String, Map<String, PocketShotStats>> = emptyMap(),
+    val selfPlayShotsSimulated: Int = 0,
+    val selfPlaySureShotsFound: Int = 0,
     val straightFoulCount: Int = 0,
     val recentTactics: List<String> = emptyList(),
     val recentFouls: List<String> = emptyList(),
@@ -322,12 +341,41 @@ data class CarromMemoryData(
         }
         return spatialFouls >= 2 && spatialFouls > spatialClean + 1
     }
+    /**
+     * The learned table for the active board profile, if any. Lookups check
+     * this table FIRST and fall back to the global table, so a board that
+     * has no learned data yet still benefits from older/global learning —
+     * but a board WITH its own data is never polluted by another board's.
+     */
+    fun activeProfileStats(): Map<String, PocketShotStats> =
+        if (activeBoardProfileName.isNotBlank()) {
+            profileStats[activeBoardProfileName] ?: emptyMap()
+        } else {
+            emptyMap()
+        }
+
     fun statsFor(pocketIndex: Int, cutAngleDeg: Float, distRatio: Float = 0.7f): PocketShotStats? {
         val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
-        // Exact (pocket, angle, distance-band) bucket first; fall back to the
-        // legacy unbanded key so stats learned before distance banding still count.
-        return statsByBucket[bucketKey(pocketIndex, bucket, distRatio)]
-            ?: statsByBucket["P${pocketIndex.coerceIn(0, 3)}_${bucket.name}"]
+        val bandedKey = bucketKey(pocketIndex, bucket, distRatio)
+        val legacyKey = "P${pocketIndex.coerceIn(0, 3)}_${bucket.name}"
+        // Active board profile first, then the global table.
+        val profileMap = activeProfileStats()
+        return profileMap[bandedKey] ?: profileMap[legacyKey]
+            // Exact (pocket, angle, distance-band) bucket first; fall back to the
+            // legacy unbanded key so stats learned before distance banding still count.
+            ?: statsByBucket[bandedKey]
+            ?: statsByBucket[legacyKey]
+    }
+
+    /**
+     * Global table overlaid with the active profile's table (profile wins
+     * per bucket key). Used for sibling-band fallbacks so a bucket is never
+     * counted twice.
+     */
+    fun mergedStatsValues(): Collection<PocketShotStats> {
+        val merged = statsByBucket.toMutableMap()
+        merged.putAll(activeProfileStats())
+        return merged.values
     }
 
     fun learnedPowerScaleFor(pocketIndex: Int, cutAngleDeg: Float, distRatio: Float = 0.7f): Float {
@@ -335,8 +383,9 @@ data class CarromMemoryData(
         if (exact != null && exact.attempts > 0) return exact.learnedPowerScale
         // No data for this distance band yet: average the other bands of the
         // same pocket + angle bucket (weighted by attempts) instead of 1.0.
+        // Sibling search covers the active profile table AND the global one.
         val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
-        val siblings = statsByBucket.values.filter {
+        val siblings = mergedStatsValues().filter {
             it.pocketIndex == pocketIndex.coerceIn(0, 3) && it.angleBucket == bucket && it.attempts > 0
         }
         if (siblings.isEmpty()) return 1.0f
@@ -349,7 +398,7 @@ data class CarromMemoryData(
         val exact = statsFor(pocketIndex, cutAngleDeg, distRatio)
         if (exact != null && exact.attempts > 0) return exact.confidenceAdjustment()
         val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
-        val siblings = statsByBucket.values.filter {
+        val siblings = mergedStatsValues().filter {
             it.pocketIndex == pocketIndex.coerceIn(0, 3) && it.angleBucket == bucket && it.attempts > 0
         }
         if (siblings.isEmpty()) return 0f
@@ -368,7 +417,12 @@ data class CarromMemoryData(
         obstacles: List<CarromPiece>,
         targetCoin: CarromPiece,
         ghostBall: Point2D,
-        pocketPos: Point2D
+        pocketPos: Point2D,
+        // Shot kind being solved for: a bank pattern must never be offered
+        // for a direct shot (and vice versa). Defaults keep the two existing
+        // direct-shot call sites unchanged.
+        isBankShot: Boolean = false,
+        isComboShot: Boolean = false
     ): TrainingMatchResult? {
         if (cleanShotPatterns.isEmpty()) return null
         val strikerNormX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
@@ -400,6 +454,12 @@ data class CarromMemoryData(
         var best: TrainingMatchResult? = null
         for (pattern in cleanShotPatterns) {
             if (pattern.pocketIndex != pocketIndex) continue
+            // Same shot kind only: bank/combo patterns never match a direct
+            // shot, and direct patterns never match a bank/combo.
+            if (pattern.isBankShot != isBankShot || pattern.isComboShot != isComboShot) continue
+            // Same board only: a pattern learned on one board never matches
+            // on another. "" = global pattern from before profiles existed.
+            if (pattern.profileName.isNotBlank() && pattern.profileName != activeBoardProfileName) continue
             val angleDiff = kotlin.math.abs(pattern.cutAngleDeg - cutAngleDeg)
             if (angleDiff > 16f) continue
             val coinDist = kotlin.math.hypot(pattern.coinNormX - coinNormX, pattern.coinNormY - coinNormY)
@@ -416,10 +476,18 @@ data class CarromMemoryData(
 
             val rawScore = (angleSim * 0.36f + coinSim * 0.26f + strikerSim * 0.22f + distSim * 0.16f + repBonus + clearanceBonus - collisionPenalty * 0.55f)
                 .coerceIn(0f, 1f)
+            // Combos stay lower-confidence than direct sure shots: a small
+            // contact-point error changes a combo outcome, so a combo pattern
+            // can never outrank a strong direct pattern. Banks sit between.
+            val cappedScore = when {
+                isComboShot -> rawScore.coerceAtMost(0.80f)
+                isBankShot -> rawScore.coerceAtMost(0.88f)
+                else -> rawScore
+            }
 
-            if (rawScore >= 0.44f && (best == null || rawScore > best.matchScore)) {
+            if (cappedScore >= 0.44f && (best == null || cappedScore > best.matchScore)) {
                 best = TrainingMatchResult(
-                    matchScore = rawScore,
+                    matchScore = cappedScore,
                     pattern = pattern,
                     collisionRiskPenalty = collisionPenalty,
                     recommendedPullScale = pattern.observedPullScale
@@ -623,6 +691,46 @@ data class BoardPieceCounts(
     val queenCount: Int
 )
 
+/**
+ * Why a shot missed, classified from BEFORE/AFTER coin positions
+ * (board-normalised, 0-1) — not from piece counts alone. The cause decides
+ * what the learned table changes, so the bot stops blaming power for a
+ * deflection and stops blaming aim for an undershoot:
+ * - UNDERSHOOT: coin stopped short of the pocket -> power +0.05.
+ * - OVERSHOOT: coin passed the pocket / bounced out -> power -0.05
+ *   (slight) or -0.08 (far past the pocket).
+ * - DEFLECTION: coin veered off its line (kissed another coin) -> record
+ *   a collision-risk pattern at that spot; power is NOT blamed.
+ * - WHIFF: coin barely moved -> re-check aim/calibration; power is NOT
+ *   adjusted.
+ * - SCRATCH: striker potted (foul) -> scratch zone + foul signature;
+ *   never repeat that striker placement/line.
+ * Classification runs AFTER the shot, off the turn clock — it never
+ * delays the next shot's 5s window.
+ */
+enum class CarromMissCause {
+    UNDERSHOOT, OVERSHOOT, DEFLECTION, WHIFF, SCRATCH, UNKNOWN
+}
+
+/** Board-normalised geometry for one miss-cause classification. */
+data class MissCauseInput(
+    val preCoinNorm: Point2D,
+    val postCoinNorm: Point2D?,
+    val pocketNorm: Point2D,
+    val coinRadiusNorm: Float,
+    val pocketRadiusNorm: Float
+)
+
+data class MissCauseClassification(
+    val cause: CarromMissCause,
+    /** True when an overshoot went far past the pocket (bigger cut). */
+    val overshootFar: Boolean = false,
+    /** Deflection point along the coin->pocket line, 0..1 (risk pattern). */
+    val deflectAlongRatio: Float = 0.5f,
+    /** Deflection lateral deviation in coin radii (risk pattern). */
+    val deflectLateralRadii: Float = 0f
+)
+
 data class PendingCarromShotRecord(
     val myCoinColor: CoinColor,
     val targetCoinColor: CoinColor,
@@ -644,7 +752,11 @@ data class PendingCarromShotRecord(
     val distRatio: Float = 0.7f,
     val observedPullScale: Float = 1.0f,
     val minCorridorClearanceRadii: Float = 3.5f,
-    val corridorObstacles: List<CorridorObstacleObservation> = emptyList()
+    val corridorObstacles: List<CorridorObstacleObservation> = emptyList(),
+    /** True when the pre-shot detection was stable across 2 frames (vision-error guard). */
+    val preDetectionStable: Boolean = false,
+    /** True when this record carries real solver geometry (coinNormX/Y from a solved shot), so a position-based miss cause can be classified. False for AI-planned fallback drags. */
+    val hasSolverGeometry: Boolean = false
 )
 
 data class CarromEvaluationResult(
@@ -652,7 +764,9 @@ data class CarromEvaluationResult(
     val updatedMemory: CarromMemoryData,
     val learnedTacticLesson: String?,
     val learnedFoulLesson: String?,
-    val summaryMessage: String
+    val summaryMessage: String,
+    /** Why the shot missed, when classified from pre/post positions. */
+    val missCause: CarromMissCause? = null
 )
 
 class CarromShotMemoryStore(context: Context) {
@@ -677,16 +791,30 @@ class CarromShotMemoryStore(context: Context) {
 
     suspend fun recordShotOutcome(
         pendingShot: PendingCarromShotRecord,
-        postCounts: BoardPieceCounts
+        postCounts: BoardPieceCounts,
+        /** Pre/post coin geometry for miss-cause classification (null = counts only). */
+        missCauseInput: MissCauseInput? = null
     ): CarromEvaluationResult {
         return mutex.withLock {
             val evaluated = evaluateShotOutcome(
                 current = _memory.value,
                 pendingShot = pendingShot,
-                postCounts = postCounts
+                postCounts = postCounts,
+                missCauseInput = missCauseInput
             )
-            persistLocked(evaluated.updatedMemory)
-            evaluated
+            // Bot shots feed the pattern library too: a clean pot reinforces
+            // the pattern, and a miss/foul DECAYS it (see
+            // updateTrainingPatternsFromShot). Without this, a bank/combo
+            // pattern that fails in a real match would keep its stale
+            // "sure shot" reputation forever.
+            val withPatterns = updateTrainingPatternsFromShot(
+                memory = evaluated.updatedMemory,
+                pendingShot = pendingShot,
+                outcomeType = evaluated.outcomeType,
+                observedPowerHint = null
+            )
+            persistLocked(withPatterns)
+            evaluated.copy(updatedMemory = withPatterns)
         }
     }
 
@@ -763,6 +891,118 @@ class CarromShotMemoryStore(context: Context) {
         }
     }
 
+    /**
+     * Per-match calibration reset (board-variation rule): at the start of
+     * EVERY match, friction, pocket-jaw buffer, power gain and slider gain
+     * go back to neutral (1.0 / 0) and shotsThisMatch to 0, so the previous
+     * board's tuning never leaks into the new board. The LEARNED tables
+     * (statsByBucket / profileStats / patterns) are NOT touched — learned
+     * confidence is a prior, and the first few shots of the new match
+     * re-tune the live calibration on top of it. Live calibration always
+     * wins at shot time: the solver multiplies the learned pull by
+     * matchCalibration.shotPowerGain.
+     */
+    suspend fun resetMatchCalibration() {
+        mutex.withLock {
+            val cur = _memory.value
+            persistLocked(
+                cur.copy(
+                    matchCalibration = MatchPhysicsCalibration(),
+                    lastUpdatedMs = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    /**
+     * Save a NAMED board profile from the Board Calibration & Aim Lab
+     * (screenshot upload -> pocket alignment -> colour picking -> Test Aim).
+     * Upserts by profileName and activates it: boardCalibration becomes
+     * this profile and activeBoardProfileName switches, so the solver and
+     * the learned tables immediately use this board.
+     */
+    suspend fun saveNamedBoardProfile(profile: BoardCalibrationProfile) {
+        val name = profile.profileName.takeIf { it.isNotBlank() } ?: "Default"
+        val named = profile.copy(profileName = name, enabled = true)
+        mutex.withLock {
+            val cur = _memory.value
+            val updatedProfiles = cur.boardProfiles
+                .filterNot { it.profileName == name }
+                .toMutableList()
+            updatedProfiles.add(named)
+            persistLocked(
+                cur.copy(
+                    boardProfiles = updatedProfiles,
+                    boardCalibration = named,
+                    activeBoardProfileName = name,
+                    lastUpdatedMs = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    /**
+     * Activate a saved board profile by name (used by the match-start
+     * Auto-Snap matcher). Returns false when no such profile exists — the
+     * caller then keeps auto-detection and must NOT silently fall back to
+     * a wrong board. Activation also resets the per-match calibration,
+     * because a different board means different friction.
+     */
+    suspend fun activateBoardProfile(profileName: String): Boolean {
+        return mutex.withLock {
+            val cur = _memory.value
+            val profile = cur.boardProfiles.firstOrNull { it.profileName == profileName }
+                ?: return@withLock false
+            persistLocked(
+                cur.copy(
+                    boardCalibration = profile.copy(enabled = true),
+                    activeBoardProfileName = profileName,
+                    matchCalibration = MatchPhysicsCalibration(),
+                    lastUpdatedMs = System.currentTimeMillis()
+                )
+            )
+            true
+        }
+    }
+
+    // Self-play trainer guard: never run two training sweeps at once.
+    @Volatile
+    private var selfPlayRunning = false
+
+    /**
+     * Self-play trainer entry point (callable on demand, e.g. from Settings
+     * or when the app is idle on the launcher). Runs the offline sweep on
+     * a background dispatcher, records every simulated shot into the
+     * learned tables, and persists once at the end — so the results
+     * survive app restarts in the same tappilot_carrom_memory.json file.
+     * Returns null when a sweep is already running.
+     */
+    suspend fun runSelfPlayTraining(
+        config: SelfPlayConfig = SelfPlayConfig()
+    ): SelfPlayReport? {
+        if (selfPlayRunning) return null
+        selfPlayRunning = true
+        return try {
+            // The whole sweep runs under the mutex: a live shot recorded
+            // mid-sweep must never be overwritten by the trainer's persist
+            // (the sweep starts from _memory.value). The mutex hold is
+            // ~2s of background CPU; live recording serialises behind it
+            // but no record is ever lost.
+            mutex.withLock {
+                val report = withContext(Dispatchers.Default) {
+                    CarromSelfPlayTrainer.runSweep(
+                        memory = _memory.value,
+                        config = config
+                    )
+                }
+                persistLocked(report.updatedMemory)
+                report
+            }
+        } finally {
+            selfPlayRunning = false
+        }
+    }
+
     suspend fun clearAll() {
         mutex.withLock {
             persistLocked(CarromMemoryData())
@@ -794,13 +1034,70 @@ class CarromShotMemoryStore(context: Context) {
             )
         }
 
+        /**
+         * Classify WHY a shot missed from the target coin's pre/post
+         * positions (board-normalised). Pure geometry, no I/O:
+         * - Foul (striker potted / penalty) -> SCRATCH.
+         * - Coin potted -> UNKNOWN (no miss to explain).
+         * - Coin not found after the shot -> UNKNOWN (detection lost it;
+         *   never blame power on a vision gap).
+         * - Coin moved < 0.6 radii -> WHIFF (aim/calibration, not power).
+         * - Coin veered > 1.6 radii sideways off its pocket line while
+         *   travelling -> DEFLECTION (kiss/collision, not power).
+         * - Coin stopped short of the pocket mouth -> UNDERSHOOT.
+         * - Coin travelled past the pocket mouth -> OVERSHOOT (far when
+         *   it went > 2 pocket-radii beyond the pocket centre).
+         */
+        fun classifyMissCause(
+            outcomeType: CarromShotOutcomeType,
+            input: MissCauseInput?
+        ): MissCauseClassification {
+            if (outcomeType == CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY) {
+                return MissCauseClassification(CarromMissCause.SCRATCH)
+            }
+            if (outcomeType != CarromShotOutcomeType.MISSED_OR_NO_POT || input == null) {
+                return MissCauseClassification(CarromMissCause.UNKNOWN)
+            }
+            val post = input.postCoinNorm ?: return MissCauseClassification(CarromMissCause.UNKNOWN)
+            val r = input.coinRadiusNorm.coerceAtLeast(0.005f)
+            val toPost = Point2D(post.x - input.preCoinNorm.x, post.y - input.preCoinNorm.y)
+            val movedRadii = kotlin.math.hypot(toPost.x.toDouble(), toPost.y.toDouble()).toFloat() / r
+            if (movedRadii < 0.6f) {
+                return MissCauseClassification(CarromMissCause.WHIFF)
+            }
+            val toPocket = Point2D(input.pocketNorm.x - input.preCoinNorm.x, input.pocketNorm.y - input.preCoinNorm.y)
+            val distToPocket = kotlin.math.hypot(toPocket.x.toDouble(), toPocket.y.toDouble()).toFloat().coerceAtLeast(r)
+            val dirX = toPocket.x / distToPocket
+            val dirY = toPocket.y / distToPocket
+            val along = toPost.x * dirX + toPost.y * dirY
+            val lateral = kotlin.math.abs(toPost.x * dirY - toPost.y * dirX)
+            val lateralRadii = lateral / r
+            if (lateralRadii > 1.6f && along > distToPocket * 0.35f) {
+                return MissCauseClassification(
+                    cause = CarromMissCause.DEFLECTION,
+                    deflectAlongRatio = (along / distToPocket).coerceIn(0f, 1f),
+                    deflectLateralRadii = lateralRadii
+                )
+            }
+            if (along < distToPocket - input.pocketRadiusNorm) {
+                return MissCauseClassification(CarromMissCause.UNDERSHOOT)
+            }
+            val beyond = along - distToPocket
+            return MissCauseClassification(
+                cause = CarromMissCause.OVERSHOOT,
+                overshootFar = beyond > input.pocketRadiusNorm * 2f
+            )
+        }
+
         fun evaluateShotOutcome(
             current: CarromMemoryData,
             pendingShot: PendingCarromShotRecord,
             postCounts: BoardPieceCounts,
             lessonPrefix: String = "",
             recordFoulSignatures: Boolean = true,
-            recordPlacementStats: Boolean = true
+            recordPlacementStats: Boolean = true,
+            /** Pre/post coin geometry for miss-cause classification (null = counts only, coarse rules). */
+            missCauseInput: MissCauseInput? = null
         ): CarromEvaluationResult {
             val pre = pendingShot.preCounts
             val myDelta = postCounts.myCount - pre.myCount
@@ -838,7 +1135,11 @@ class CarromShotMemoryStore(context: Context) {
             // short vs long range. pendingShot.distRatio is the real recorded ratio
             // (striker -> coin -> pocket) / board width, defaulting to 0.7 (Medium).
             val key = CarromMemoryData.bucketKey(pocketIdx, angleBucket, pendingShot.distRatio)
-            val existingStats = current.statsByBucket[key] ?: PocketShotStats(
+            // Profile-aware read: the active board's own bucket first, then
+            // the global one — so a board's learned power is never mixed
+            // with another board's.
+            val existingStats = current.statsFor(pocketIdx, pendingShot.cutAngleDeg, pendingShot.distRatio)
+                ?: PocketShotStats(
                 key = key,
                 pocketIndex = pocketIdx,
                 angleBucket = angleBucket
@@ -857,6 +1158,16 @@ class CarromShotMemoryStore(context: Context) {
             var tacticLesson: String? = null
             var foulLesson: String? = null
             var straightFouls = current.straightFoulCount
+
+            // Miss-cause classification (pre/post coin positions): the
+            // cause — not the raw miss — decides what the learned table
+            // changes. Without geometry the old coarse rules apply.
+            val missClassification = classifyMissCause(outcomeType, missCauseInput)
+            val missCause = when {
+                missCauseInput != null -> missClassification.cause
+                outcomeType == CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY -> CarromMissCause.SCRATCH
+                else -> CarromMissCause.UNKNOWN
+            }
 
             val ps = current.placementStats
             val newPlacementStats = when (outcomeType) {
@@ -908,17 +1219,39 @@ class CarromShotMemoryStore(context: Context) {
                     }
                 }
                 CarromShotOutcomeType.MISSED_OR_NO_POT -> {
-                    // Adaptive speed calibration: sharp cuts or bank shots missing usually need slightly more drive;
-                    // straight/soft-distance hangers missing with HARD power bounce out, so soften slightly.
-                    newPowerScale = when {
-                        pendingShot.powerStyle == CarromPowerStyle.HARD && angleBucket == CarromAngleBucket.STRAIGHT ->
-                            (existingStats.learnedPowerScale - 0.05f).coerceIn(0.72f, 1.38f)
-                        angleBucket == CarromAngleBucket.SHARP_CUT || pendingShot.isBankShot ->
-                            (existingStats.learnedPowerScale + 0.06f).coerceIn(0.72f, 1.38f)
+                    // Miss-cause learning: the classified cause — not the
+                    // raw miss — decides the power change, so the table
+                    // stops blaming power for a deflection or a whiff.
+                    // UNDERSHOOT +0.05, OVERSHOOT -0.05 (slight) / -0.08
+                    // (far), DEFLECTION/WHIFF no power change. UNKNOWN
+                    // (no geometry) keeps the old adaptive rules.
+                    newPowerScale = when (missCause) {
+                        CarromMissCause.UNDERSHOOT ->
+                            (existingStats.learnedPowerScale + 0.05f).coerceIn(0.72f, 1.38f)
+                        CarromMissCause.OVERSHOOT ->
+                            (existingStats.learnedPowerScale - if (missClassification.overshootFar) 0.08f else 0.05f).coerceIn(0.72f, 1.38f)
+                        CarromMissCause.DEFLECTION, CarromMissCause.WHIFF ->
+                            existingStats.learnedPowerScale
                         else ->
-                            (existingStats.learnedPowerScale + 0.03f).coerceIn(0.72f, 1.38f)
+                            when {
+                                pendingShot.powerStyle == CarromPowerStyle.HARD && angleBucket == CarromAngleBucket.STRAIGHT ->
+                                    (existingStats.learnedPowerScale - 0.05f).coerceIn(0.72f, 1.38f)
+                                angleBucket == CarromAngleBucket.SHARP_CUT || pendingShot.isBankShot ->
+                                    (existingStats.learnedPowerScale + 0.06f).coerceIn(0.72f, 1.38f)
+                                else ->
+                                    (existingStats.learnedPowerScale + 0.03f).coerceIn(0.72f, 1.38f)
+                            }
                     }
-                    if (existingStats.misses >= 1 && (existingStats.misses + 1) % 2 == 0) {
+                    val causeNote = when (missCause) {
+                        CarromMissCause.UNDERSHOOT -> "Undershoot — coin stopped short; power +0.05 for this pocket/angle/distance."
+                        CarromMissCause.OVERSHOOT -> "Overshoot — coin passed the pocket; power ${if (missClassification.overshootFar) "-0.08" else "-0.05"}."
+                        CarromMissCause.DEFLECTION -> "Deflection — coin veered off its line (collision risk recorded); power unchanged."
+                        CarromMissCause.WHIFF -> "Whiff — coin barely moved; re-check aim/calibration, power unchanged."
+                        else -> null
+                    }
+                    if (causeNote != null) {
+                        foulLesson = "${lessonPrefix}Missed $pocketLabel ($shotKind, $powerLabel) — $causeNote"
+                    } else if (existingStats.misses >= 1 && (existingStats.misses + 1) % 2 == 0) {
                         val advice = if (newPowerScale > existingStats.learnedPowerScale) {
                             "increase drive power"
                         } else {
@@ -947,8 +1280,20 @@ class CarromShotMemoryStore(context: Context) {
                 learnedPowerScale = newPowerScale
             )
 
-            val updatedMap = current.statsByBucket.toMutableMap()
-            updatedMap[key] = updatedBucket
+            // Per-board table: when a board profile is active, this bucket
+            // write goes to THAT board's own table, never the global one —
+            // a shot learned on one board's friction must not leak into
+            // another board's table. With no active profile it goes global.
+            val activeProfile = current.activeBoardProfileName
+            val updatedGlobalMap = current.statsByBucket.toMutableMap()
+            val updatedProfileStats = current.profileStats.toMutableMap()
+            if (activeProfile.isNotBlank()) {
+                val profileMap = updatedProfileStats[activeProfile]?.toMutableMap() ?: mutableMapOf()
+                profileMap[key] = updatedBucket
+                updatedProfileStats[activeProfile] = profileMap
+            } else {
+                updatedGlobalMap[key] = updatedBucket
+            }
 
             val newTactics = if (tacticLesson != null) {
                 (current.recentTactics.filterNot { it.equals(tacticLesson, true) } + tacticLesson)
@@ -991,18 +1336,70 @@ class CarromShotMemoryStore(context: Context) {
                     newShotPowerGain = (newShotPowerGain - 0.04f).coerceIn(0.78f, 1.28f)
                 }
                 CarromShotOutcomeType.MISSED_OR_NO_POT -> {
-                    if (pendingShot.isBankShot || angleBucket == CarromAngleBucket.SHARP_CUT) {
-                        newFrictionScale = (newFrictionScale + 0.04f).coerceIn(0.80f, 1.28f)
-                        newJawBuffer = (newJawBuffer + 1.4f).coerceIn(0f, 10f)
-                        newShotPowerGain = (newShotPowerGain + 0.03f).coerceIn(0.78f, 1.28f)
-                    } else if (pendingShot.powerStyle == CarromPowerStyle.HARD ||
-                        (angleBucket == CarromAngleBucket.STRAIGHT && pendingShot.powerStyle != CarromPowerStyle.SOFT)
-                    ) {
-                        newFrictionScale = (newFrictionScale - 0.03f).coerceIn(0.80f, 1.28f)
-                        newShotPowerGain = (newShotPowerGain - 0.03f).coerceIn(0.78f, 1.28f)
-                    } else {
-                        newShotPowerGain = (newShotPowerGain + 0.02f).coerceIn(0.78f, 1.28f)
+                    // Cause-aware live calibration: an undershoot means
+                    // the board needs more drive, an overshoot less;
+                    // a deflection or a whiff must NOT move friction or
+                    // power gain (the cause was a kiss / aim, not speed).
+                    // UNKNOWN keeps the old coarse rules.
+                    when (missCause) {
+                        CarromMissCause.UNDERSHOOT -> {
+                            newFrictionScale = (newFrictionScale + 0.04f).coerceIn(0.80f, 1.28f)
+                            newJawBuffer = (newJawBuffer + 1.4f).coerceIn(0f, 10f)
+                            newShotPowerGain = (newShotPowerGain + 0.03f).coerceIn(0.78f, 1.28f)
+                        }
+                        CarromMissCause.OVERSHOOT -> {
+                            newFrictionScale = (newFrictionScale - 0.03f).coerceIn(0.80f, 1.28f)
+                            newShotPowerGain = (newShotPowerGain - 0.03f).coerceIn(0.78f, 1.28f)
+                        }
+                        CarromMissCause.DEFLECTION, CarromMissCause.WHIFF -> Unit
+                        else -> {
+                            if (pendingShot.isBankShot || angleBucket == CarromAngleBucket.SHARP_CUT) {
+                                newFrictionScale = (newFrictionScale + 0.04f).coerceIn(0.80f, 1.28f)
+                                newJawBuffer = (newJawBuffer + 1.4f).coerceIn(0f, 10f)
+                                newShotPowerGain = (newShotPowerGain + 0.03f).coerceIn(0.78f, 1.28f)
+                            } else if (pendingShot.powerStyle == CarromPowerStyle.HARD ||
+                                (angleBucket == CarromAngleBucket.STRAIGHT && pendingShot.powerStyle != CarromPowerStyle.SOFT)
+                            ) {
+                                newFrictionScale = (newFrictionScale - 0.03f).coerceIn(0.80f, 1.28f)
+                                newShotPowerGain = (newShotPowerGain - 0.03f).coerceIn(0.78f, 1.28f)
+                            } else {
+                                newShotPowerGain = (newShotPowerGain + 0.02f).coerceIn(0.78f, 1.28f)
+                            }
+                        }
                     }
+                }
+            }
+
+            // Deflection: the coin veered off its pocket line, so a kiss
+            // happened at that spot — record a collision-risk pattern on
+            // the COIN_TO_POCKET corridor. The solver's
+            // corridorCollisionRiskPenalty then steers future shots away
+            // from that line; power is deliberately NOT blamed.
+            var newRisks = current.collisionRisks
+            if (missCause == CarromMissCause.DEFLECTION) {
+                val alongB = (missClassification.deflectAlongRatio * 4f).toInt().coerceIn(0, 3)
+                val rKey = "P${pocketIdx}_${angleBucket.name}_COIN_TO_POCKET_A$alongB"
+                val prevRisk = newRisks.firstOrNull { it.riskKey == rKey }
+                newRisks = if (prevRisk != null) {
+                    newRisks.map {
+                        if (it.riskKey == rKey) it.copy(
+                            foulOrMissCount = it.foulOrMissCount + 1,
+                            blockerLateralInRadii = maxOf(it.blockerLateralInRadii, missClassification.deflectLateralRadii),
+                            lastSeenMs = pendingShot.timestampMs
+                        ) else it
+                    }
+                } else {
+                    newRisks + CollisionRiskPattern(
+                        riskKey = rKey,
+                        pocketIndex = pocketIdx,
+                        angleBucket = angleBucket,
+                        corridorSegment = "COIN_TO_POCKET",
+                        blockerAlongBucket = alongB,
+                        blockerLateralInRadii = missClassification.deflectLateralRadii,
+                        foulOrMissCount = 1,
+                        cleanPotDespiteNearCount = 0,
+                        lastSeenMs = pendingShot.timestampMs
+                    )
                 }
             }
 
@@ -1066,9 +1463,11 @@ class CarromShotMemoryStore(context: Context) {
             }
 
             val updatedMemory = current.copy(
-                statsByBucket = updatedMap,
+                statsByBucket = updatedGlobalMap,
+                profileStats = updatedProfileStats,
                 placementStats = newPlacementStats,
                 scratchHeatmap = newHeatmap,
+                collisionRisks = newRisks,
                 matchCalibration = prevCal.copy(
                     frictionScale = newFrictionScale,
                     pocketJawSafetyBuffer = newJawBuffer,
@@ -1090,7 +1489,7 @@ class CarromShotMemoryStore(context: Context) {
                 CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY ->
                     "Carrom Outcome: FOUL detected (penalty coin/opponent pot) on $pocketLabel — power softened & guard saved!"
                 CarromShotOutcomeType.MISSED_OR_NO_POT ->
-                    "Carrom Outcome: No coin potted on $pocketLabel ($powerLabel) — powerScale calibrated to ${String.format(Locale.US, "%.2f", newPowerScale)}."
+                    "Carrom Outcome: No coin potted on $pocketLabel ($powerLabel) — ${missCause.name.lowercase()} — powerScale calibrated to ${String.format(Locale.US, "%.2f", newPowerScale)}."
             }
 
             return CarromEvaluationResult(
@@ -1098,7 +1497,8 @@ class CarromShotMemoryStore(context: Context) {
                 updatedMemory = updatedMemory,
                 learnedTacticLesson = tacticLesson,
                 learnedFoulLesson = foulLesson,
-                summaryMessage = summary
+                summaryMessage = summary,
+                missCause = missCause
             )
         }
 
@@ -1174,6 +1574,9 @@ class CarromShotMemoryStore(context: Context) {
                         .put("wasCollisionAssisted", pat.wasCollisionAssisted)
                         .put("successCount", pat.successCount)
                         .put("lastUsedMs", pat.lastUsedMs)
+                        .put("isBankShot", pat.isBankShot)
+                        .put("isComboShot", pat.isComboShot)
+                        .put("profileName", pat.profileName)
                 )
             }
 
@@ -1193,6 +1596,34 @@ class CarromShotMemoryStore(context: Context) {
                 )
             }
 
+            val boardProfilesArr = JSONArray()
+            for (profile in data.boardProfiles) {
+                boardProfilesArr.put(profile.toJson())
+            }
+
+            val profileStatsArr = JSONArray()
+            for ((profileName, buckets) in data.profileStats) {
+                val profileBucketsArr = JSONArray()
+                for (st in buckets.values) {
+                    profileBucketsArr.put(
+                        JSONObject()
+                            .put("key", st.key)
+                            .put("pocketIndex", st.pocketIndex)
+                            .put("angleBucket", st.angleBucket.name)
+                            .put("attempts", st.attempts)
+                            .put("successes", st.successes)
+                            .put("fouls", st.fouls)
+                            .put("misses", st.misses)
+                            .put("learnedPowerScale", st.learnedPowerScale.toDouble())
+                    )
+                }
+                profileStatsArr.put(
+                    JSONObject()
+                        .put("profileName", profileName)
+                        .put("buckets", profileBucketsArr)
+                )
+            }
+
             root.put("buckets", bucketsArray)
             root.put("placementStats", placementObj)
             root.put("scratchHeatmap", heatmapObj)
@@ -1201,6 +1632,11 @@ class CarromShotMemoryStore(context: Context) {
             root.put("cleanShotPatterns", cleanPatternsArr)
             root.put("collisionRisks", collisionRisksArr)
             root.put("boardCalibration", data.boardCalibration.toJson())
+            root.put("boardProfiles", boardProfilesArr)
+            root.put("activeBoardProfileName", data.activeBoardProfileName)
+            root.put("profileStats", profileStatsArr)
+            root.put("selfPlayShotsSimulated", data.selfPlayShotsSimulated)
+            root.put("selfPlaySureShotsFound", data.selfPlaySureShotsFound)
             root.put("straightFoulCount", data.straightFoulCount)
             root.put("recentTactics", JSONArray(data.recentTactics))
             root.put("recentFouls", JSONArray(data.recentFouls))
@@ -1324,7 +1760,10 @@ class CarromShotMemoryStore(context: Context) {
                         minCorridorClearanceRadii = obj.optDouble("minCorridorClearanceRadii", 3.5).toFloat().coerceIn(0.5f, 6.0f),
                         wasCollisionAssisted = obj.optBoolean("wasCollisionAssisted", false),
                         successCount = obj.optInt("successCount", 1).coerceAtLeast(1),
-                        lastUsedMs = obj.optLong("lastUsedMs", 0L)
+                        lastUsedMs = obj.optLong("lastUsedMs", 0L),
+                        isBankShot = obj.optBoolean("isBankShot", false),
+                        isComboShot = obj.optBoolean("isComboShot", false),
+                        profileName = obj.optString("profileName", "")
                     )
                 )
             }
@@ -1352,6 +1791,43 @@ class CarromShotMemoryStore(context: Context) {
                 )
             }
 
+            // Named board profiles (Aim Lab) — missing on old files.
+            val boardProfilesArr = root.optJSONArray("boardProfiles") ?: JSONArray()
+            val boardProfilesList = ArrayList<BoardCalibrationProfile>(boardProfilesArr.length())
+            for (i in 0 until boardProfilesArr.length()) {
+                val obj = boardProfilesArr.optJSONObject(i) ?: continue
+                boardProfilesList.add(BoardCalibrationProfile.fromJson(obj))
+            }
+
+            // Per-board learned tables — missing on old files.
+            val profileStatsArr = root.optJSONArray("profileStats") ?: JSONArray()
+            val profileStatsMap = LinkedHashMap<String, Map<String, PocketShotStats>>()
+            for (i in 0 until profileStatsArr.length()) {
+                val obj = profileStatsArr.optJSONObject(i) ?: continue
+                val profileName = obj.optString("profileName").takeIf { it.isNotBlank() } ?: continue
+                val bucketsArr = obj.optJSONArray("buckets") ?: JSONArray()
+                val bucketMap = LinkedHashMap<String, PocketShotStats>()
+                for (j in 0 until bucketsArr.length()) {
+                    val bObj = bucketsArr.optJSONObject(j) ?: continue
+                    val key = bObj.optString("key").takeIf { it.isNotBlank() } ?: continue
+                    val bPocketIndex = bObj.optInt("pocketIndex", 0).coerceIn(0, 3)
+                    val bAngleBucket = runCatching {
+                        CarromAngleBucket.valueOf(bObj.optString("angleBucket", CarromAngleBucket.MEDIUM_CUT.name))
+                    }.getOrDefault(CarromAngleBucket.MEDIUM_CUT)
+                    bucketMap[key] = PocketShotStats(
+                        key = key,
+                        pocketIndex = bPocketIndex,
+                        angleBucket = bAngleBucket,
+                        attempts = bObj.optInt("attempts", 0).coerceAtLeast(0),
+                        successes = bObj.optInt("successes", 0).coerceAtLeast(0),
+                        fouls = bObj.optInt("fouls", 0).coerceAtLeast(0),
+                        misses = bObj.optInt("misses", 0).coerceAtLeast(0),
+                        learnedPowerScale = bObj.optDouble("learnedPowerScale", 1.0).toFloat().coerceIn(0.72f, 1.38f)
+                    )
+                }
+                profileStatsMap[profileName] = bucketMap
+            }
+
             return CarromMemoryData(
                 statsByBucket = map,
                 placementStats = placementStats,
@@ -1361,6 +1837,11 @@ class CarromShotMemoryStore(context: Context) {
                 cleanShotPatterns = cleanPatternsList,
                 collisionRisks = risksList,
                 boardCalibration = BoardCalibrationProfile.fromJson(root.optJSONObject("boardCalibration")),
+                boardProfiles = boardProfilesList,
+                activeBoardProfileName = root.optString("activeBoardProfileName", ""),
+                profileStats = profileStatsMap,
+                selfPlayShotsSimulated = root.optInt("selfPlayShotsSimulated", 0).coerceAtLeast(0),
+                selfPlaySureShotsFound = root.optInt("selfPlaySureShotsFound", 0).coerceAtLeast(0),
                 straightFoulCount = root.optInt("straightFoulCount", 0).coerceAtLeast(0),
                 recentTactics = jsonList("recentTactics"),
                 recentFouls = jsonList("recentFouls"),
@@ -1386,8 +1867,13 @@ class CarromShotMemoryStore(context: Context) {
             if (isCleanPot) {
                 val pullScale = (observedPowerHint ?: pendingShot.observedPullScale).coerceIn(0.75f, 1.35f)
                 val kissAssisted = pendingShot.corridorObstacles.any { it.displacedOrKissed && it.lateralOffsetInRadii <= 2.4f }
+                // Same pocket + same shot kind + same board: a bank pot must
+                // never merge into a direct pattern (or vice versa).
                 val existingIdx = updatedPatterns.indexOfFirst { pat ->
                     pat.pocketIndex == pocketIdx &&
+                        pat.isBankShot == pendingShot.isBankShot &&
+                        pat.isComboShot == pendingShot.isComboShot &&
+                        (pat.profileName.isBlank() || pat.profileName == memory.activeBoardProfileName) &&
                         kotlin.math.abs(pat.cutAngleDeg - pendingShot.cutAngleDeg) <= 7.5f &&
                         kotlin.math.hypot(pat.coinNormX - pendingShot.coinNormX, pat.coinNormY - pendingShot.coinNormY) <= 0.14f &&
                         kotlin.math.abs(pat.strikerNormalizedX - pendingShot.strikerNormalizedX) <= 0.14f
@@ -1423,7 +1909,10 @@ class CarromShotMemoryStore(context: Context) {
                             minCorridorClearanceRadii = pendingShot.minCorridorClearanceRadii,
                             wasCollisionAssisted = kissAssisted,
                             successCount = 1,
-                            lastUsedMs = pendingShot.timestampMs
+                            lastUsedMs = pendingShot.timestampMs,
+                            isBankShot = pendingShot.isBankShot,
+                            isComboShot = pendingShot.isComboShot,
+                            profileName = memory.activeBoardProfileName
                         )
                     )
                 }
@@ -1468,6 +1957,31 @@ class CarromShotMemoryStore(context: Context) {
                                 lastSeenMs = pendingShot.timestampMs
                             )
                         }
+                    }
+                }
+                // A failed shot lowers the confidence of the pattern it just
+                // tried: any matching pattern (same pocket, kind, board,
+                // similar geometry) loses one success, and a pattern that
+                // falls to zero is forgotten. This is what makes a failed
+                // bank/combo in a real match actually demote that pattern
+                // instead of leaving a stale "sure shot" in the table.
+                for (idx in updatedPatterns.indices) {
+                    val pat = updatedPatterns[idx]
+                    if (pat.pocketIndex == pocketIdx &&
+                        pat.isBankShot == pendingShot.isBankShot &&
+                        pat.isComboShot == pendingShot.isComboShot &&
+                        (pat.profileName.isBlank() || pat.profileName == memory.activeBoardProfileName) &&
+                        kotlin.math.abs(pat.cutAngleDeg - pendingShot.cutAngleDeg) <= 7.5f &&
+                        kotlin.math.hypot(pat.coinNormX - pendingShot.coinNormX, pat.coinNormY - pendingShot.coinNormY) <= 0.14f &&
+                        kotlin.math.abs(pat.strikerNormalizedX - pendingShot.strikerNormalizedX) <= 0.14f
+                    ) {
+                        val nextCount = pat.successCount - 1
+                        if (nextCount <= 0) {
+                            updatedPatterns.removeAt(idx)
+                        } else {
+                            updatedPatterns[idx] = pat.copy(successCount = nextCount)
+                        }
+                        break
                     }
                 }
             }

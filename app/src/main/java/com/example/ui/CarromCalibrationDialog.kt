@@ -59,6 +59,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -94,6 +95,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.R
 import com.example.game.BoardCalibrationProfile
 import com.example.game.CalibratedHsvColor
+import com.example.game.CarromGeometrySolver
 import com.example.game.CarromVisionDetector
 import com.example.game.CarromVisionOutcome
 import com.example.game.CoinColor
@@ -163,6 +165,9 @@ fun CarromCalibrationDialog(
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isSampleBoard by remember { mutableStateOf(false) }
     var debugOutcome by remember { mutableStateOf<CarromVisionOutcome?>(null) }
+    // Striker sweep (try-and-see): one entry per tried striker position
+    // for the solved coin+pocket — পকেটে যাবে / যাবে না / ফাউল ঝুঁকি.
+    var sweepEntries by remember { mutableStateOf<List<CarromGeometrySolver.StrikerSweepEntry>>(emptyList()) }
     var statusText by remember { mutableStateOf("Pick a Carrom game screenshot (or tap Sample Board) to calibrate pockets, colors & test aim.") }
     var activeDragHandle by remember { mutableStateOf<DragHandleTarget?>(null) }
 
@@ -176,6 +181,32 @@ fun CarromCalibrationDialog(
             )
         }
         debugOutcome = result
+        // Sweep AFTER the preview, so the aim preview appears immediately
+        // and the table fills in next. Full 25-position grid here (no 5s
+        // budget in the lab). The profile guard drops a stale sweep when
+        // the user dragged a pocket crosshair mid-computation.
+        sweepEntries = emptyList()
+        if (result is CarromVisionOutcome.SolvedShot) {
+            val sweep = withContext(Dispatchers.Default) {
+                CarromGeometrySolver.sweepStrikerAim(
+                    board = result.board,
+                    coin = result.solution.targetCoin,
+                    pocketIndex = result.solution.pocketIndex,
+                    pieces = result.boardPieces,
+                    myCoinColor = previewCoinColor,
+                    screenWidth = bm.width,
+                    screenHeight = bm.height,
+                    existingStriker = result.detectedStriker,
+                    shotMemory = null,
+                    usePhysicsRollout = true,
+                    isFreestyle = previewFreestyle,
+                    maxPositions = 25
+                )
+            }
+            if (profile == cal) {
+                sweepEntries = sweep
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -211,6 +242,7 @@ fun CarromCalibrationDialog(
                         CarromVisionDetector.autoDetectCalibrationFromBitmap(loaded)
                     }
                     profile = snapped.copy(
+                        profileName = profile.profileName,
                         maxPullScale = profile.maxPullScale,
                         whiteColor = profile.whiteColor,
                         blackColor = profile.blackColor,
@@ -330,6 +362,7 @@ fun CarromCalibrationDialog(
                                     CarromVisionDetector.autoDetectCalibrationFromBitmap(bm)
                                 }
                                 profile = snapped.copy(
+                                    profileName = profile.profileName,
                                     maxPullScale = profile.maxPullScale,
                                     whiteColor = profile.whiteColor,
                                     blackColor = profile.blackColor,
@@ -363,6 +396,21 @@ fun CarromCalibrationDialog(
                         )
                     }
                 }
+
+                // Board name: this screenshot + pocket alignment + colours +
+                // Test Aim are saved as a NAMED board profile, so the bot
+                // can recognise this board again at match start (Auto-Snap
+                // matches the saved pocket geometry) and use this board's
+                // own learned table.
+                OutlinedTextField(
+                    value = profile.profileName,
+                    onValueChange = { profile = profile.copy(profileName = it.take(40)) },
+                    label = { Text("Board name (e.g. My Carrom Pool)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("input_board_profile_name")
+                )
 
                 // Mode Tabs
                 FlowRow(
@@ -817,6 +865,51 @@ fun CarromCalibrationDialog(
                             }
                         }
                     }
+                    // Striker sweep (try-and-see): for the solved coin +
+                    // pocket, every tried striker position on the baseline
+                    // with its simulated verdict — the same test the live
+                    // probe loop runs before sliding to the first position
+                    // that pots.
+                    if (sweepEntries.isNotEmpty()) {
+                        val potsN = sweepEntries.count { it.outcome == CarromGeometrySolver.StrikerSweepOutcome.POTS }
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = SlateSurfaceElevated),
+                            border = BorderStroke(1.dp, SlateBorder),
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "Striker Sweep — ${sweepEntries.size}টি জায়গা যাচাই • পকেটে যাবে $potsNটি",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = ElectricCyan,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                sweepEntries.forEach { entry ->
+                                    val (verdict, vColor) = when (entry.outcome) {
+                                        CarromGeometrySolver.StrikerSweepOutcome.POTS -> "পকেটে যাবে ✓" to CyberTeal
+                                        CarromGeometrySolver.StrikerSweepOutcome.FOUL_RISK -> "ফাউল ঝুঁকি ✗" to AmberWarning
+                                        CarromGeometrySolver.StrikerSweepOutcome.MISSES -> "যাবে না" to TextSecondary
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "স্ট্রাইকার x=${String.format(Locale.US, "%.2f", entry.strikerNormX)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "$verdict ${(entry.confidence * 100).toInt()}%",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = vColor,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
                     Text(
                         text = if (isSampleBoard) "$statusText (Showing Sample Board)" else statusText,
@@ -917,6 +1010,7 @@ fun CarromCalibrationDialog(
                     Button(
                         onClick = {
                             val finalCal = profile.copy(
+                                profileName = profile.profileName.ifBlank { "My Board" },
                                 enabled = true,
                                 pocketsNorm = if (profile.pocketsNorm.size == 4) {
                                     profile.pocketsNorm

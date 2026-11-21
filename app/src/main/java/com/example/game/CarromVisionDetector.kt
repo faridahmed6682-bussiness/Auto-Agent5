@@ -49,8 +49,45 @@ object CarromVisionDetector {
 
     private var previousBoardLuma: IntArray? = null
 
+    // Board-settled checker state: the promoted pieces of the previous
+    // frame, and how many consecutive frames they stayed still.
+    private var previousPromotedPieces: List<CarromPiece>? = null
+    private var settledFrameCount: Int = 0
+
     fun resetMotionHistory() {
         previousBoardLuma = null
+        previousPromotedPieces = null
+        settledFrameCount = 0
+    }
+
+    /**
+     * Vision-error guard (miss-cause learning): true when the promoted
+     * pieces stayed still across the last 2 analysed frames. Only then
+     * may a position-based outcome (miss cause from pre/post coin
+     * positions) be trusted; a single-frame detection can misplace a
+     * coin by a radius or more. Read right after analyzeAndSolve.
+     */
+    val isDetectionStableAcrossTwoFrames: Boolean get() = settledFrameCount >= 2
+
+    /**
+     * Board-settled check: same piece count, and every previous piece has a
+     * same-colour piece within ~0.35 coin radii in the current frame.
+     * Order-independent (detection order is not stable frame to frame).
+     * A false "settled" only skips one motion wait — the solver still
+     * verifies the shot with physics on the current frame.
+     */
+    private fun piecesSettled(
+        prev: List<CarromPiece>,
+        current: List<CarromPiece>,
+        coinRadiusPx: Float
+    ): Boolean {
+        if (prev.size != current.size) return false
+        val tolerance = coinRadiusPx * 0.35f
+        return prev.all { p ->
+            current.any { c ->
+                c.color == p.color && (c.center - p.center).length() <= tolerance
+            }
+        }
     }
 
     fun analyzeAndSolve(
@@ -102,7 +139,12 @@ object CarromVisionDetector {
         val maxMotionWaits = if (isLiveStream) 4 else 2
         if (!isTurnActive && prevLuma != null && consecutiveOfflineWaits < maxMotionWaits) {
             val meanDiff = computeMeanAbsDiff(prevLuma, currentLuma)
-            if (meanDiff > effectiveMotionThreshold) {
+            // Settled-board fast path: the promoted pieces were stable
+            // across the last two frames, so the board is still — the luma
+            // change is the pulsing turn glow / lighting, not moving coins.
+            // Proceed immediately instead of waiting blindly for the luma
+            // grid to quiet down.
+            if (meanDiff > effectiveMotionThreshold && settledFrameCount < 1) {
                 return CarromVisionOutcome.WaitStillnessOrTurn(
                     "Board motion detected (diff=${meanDiff.toInt()}) — waiting offline for coins to settle (0 API)."
                 )
@@ -229,6 +271,20 @@ object CarromVisionDetector {
                 diagnostic = "Detected 0 Carrom pieces (slider=${sliderKnobPx != null}); delegating to AI Vision.",
                 boardPieces = promoted
             )
+        }
+
+        // Board-settled checker: compare this frame's promoted pieces with
+        // the previous frame's. Same count, same colours, every centre
+        // within ~0.35 coin radii -> the board is still, even if the luma
+        // grid disagrees (turn glow / lighting changes luma, not piece
+        // positions). Two consecutive stable frames mark the board settled,
+        // and the NEXT call skips the blind luma motion wait above.
+        val prevPromoted = previousPromotedPieces
+        previousPromotedPieces = promoted
+        settledFrameCount = if (prevPromoted != null && piecesSettled(prevPromoted, promoted, strikerRadius)) {
+            (settledFrameCount + 1).coerceAtMost(3)
+        } else {
+            0
         }
 
         val strikerPiece = promoted.firstOrNull { it.color == CoinColor.STRIKER }
@@ -433,7 +489,11 @@ object CarromVisionDetector {
         isFreestyle: Boolean = false
     ): CarromVisionOutcome {
         val savedLuma = previousBoardLuma
+        val savedPromoted = previousPromotedPieces
+        val savedSettled = settledFrameCount
         previousBoardLuma = null
+        previousPromotedPieces = null
+        settledFrameCount = 0
         return try {
             analyzeAndSolve(
                 screenshot = bitmap,
@@ -450,6 +510,8 @@ object CarromVisionDetector {
             )
         } finally {
             previousBoardLuma = savedLuma
+            previousPromotedPieces = savedPromoted
+            settledFrameCount = savedSettled
         }
     }
 

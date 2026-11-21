@@ -55,6 +55,7 @@ data class CalibratedHsvColor(
  * pull-power scale, and optional coin/striker color swatches persisted across matches.
  */
 data class BoardCalibrationProfile(
+    val profileName: String = "Default",
     val enabled: Boolean = false,
     val boardLeftNorm: Float = 0.055f,
     val boardTopNorm: Float = 0.24f,
@@ -133,6 +134,7 @@ data class BoardCalibrationProfile(
             )
         }
         return JSONObject()
+            .put("profileName", profileName)
             .put("enabled", enabled)
             .put("boardLeftNorm", boardLeftNorm.toDouble())
             .put("boardTopNorm", boardTopNorm.toDouble())
@@ -179,6 +181,7 @@ data class BoardCalibrationProfile(
             val sliderLeft = obj.optDouble("sliderTrackLeftNorm", 0.18).toFloat().coerceIn(0f, 0.45f)
             val sliderRight = obj.optDouble("sliderTrackRightNorm", 0.82).toFloat().coerceIn(sliderLeft + 0.20f, 1f)
             return BoardCalibrationProfile(
+                profileName = obj.optString("profileName", "Default").takeIf { it.isNotBlank() } ?: "Default",
                 enabled = obj.optBoolean("enabled", false),
                 boardLeftNorm = left,
                 boardTopNorm = top,
@@ -201,5 +204,108 @@ data class BoardCalibrationProfile(
                 strikerColor = CalibratedHsvColor.fromJson(obj.optJSONObject("strikerColor"))
             )
         }
+    }
+}
+
+/**
+ * Matches a live-detected board (Auto-Snap geometry from the current screen)
+ * against the saved named board profiles.
+ *
+ * A profile matches when its pocket geometry is close to the live board:
+ * mean pocket-centre distance <= 3.5% of screen size and board-rect
+ * difference <= 6%. Colour swatches (when the live board has them) add a
+ * small agreement bonus but never decide a match on their own — geometry
+ * is the reliable signal, because two skins can share colours while their
+ * pockets sit in different places.
+ *
+ * Boards the bot has never seen (new skin, new pocket layout) match
+ * NOTHING: the caller must then keep auto-detection for that match and
+ * offer the Aim Lab to save it as a new named profile. There is no silent
+ * fallback to a wrong profile.
+ */
+data class BoardProfileMatch(
+    val profile: BoardCalibrationProfile,
+    val score: Float
+)
+
+object BoardProfileMatcher {
+
+    /** Max mean pocket-centre distance (normalised screen units) for a match. */
+    const val MAX_MEAN_POCKET_DISTANCE = 0.035f
+
+    /** Max board-rect difference (normalised) for a match. */
+    const val MAX_BOARD_RECT_DIFF = 0.06f
+
+    fun matchProfile(
+        live: BoardCalibrationProfile,
+        profiles: List<BoardCalibrationProfile>
+    ): BoardProfileMatch? {
+        if (live.pocketsNorm.size != 4) return null
+        var best: BoardProfileMatch? = null
+        for (profile in profiles) {
+            if (!profile.enabled || profile.pocketsNorm.size != 4) continue
+            val pocketDistance = meanPocketDistance(live.pocketsNorm, profile.pocketsNorm)
+            val rectDiff = boardRectDiff(live, profile)
+            if (pocketDistance > MAX_MEAN_POCKET_DISTANCE || rectDiff > MAX_BOARD_RECT_DIFF) continue
+            val colorBonus = colorAgreementBonus(live, profile)
+            val score = (1f - (pocketDistance * 0.7f + rectDiff * 0.3f) + colorBonus)
+                .coerceIn(0f, 1f)
+            if (best == null || score > best.score) {
+                best = BoardProfileMatch(profile, score)
+            }
+        }
+        return best
+    }
+
+    fun meanPocketDistance(livePockets: List<Point2D>, storedPockets: List<Point2D>): Float {
+        if (livePockets.size != 4 || storedPockets.size != 4) return 1f
+        var total = 0f
+        for (i in 0 until 4) {
+            total += kotlin.math.hypot(
+                livePockets[i].x - storedPockets[i].x,
+                livePockets[i].y - storedPockets[i].y
+            )
+        }
+        return total / 4f
+    }
+
+    fun boardRectDiff(a: BoardCalibrationProfile, b: BoardCalibrationProfile): Float {
+        return (abs(a.boardLeftNorm - b.boardLeftNorm) +
+            abs(a.boardTopNorm - b.boardTopNorm) +
+            abs(a.boardRightNorm - b.boardRightNorm) +
+            abs(a.boardBottomNorm - b.boardBottomNorm)) / 4f
+    }
+
+    /**
+     * Small bonus (0..0.05) when live colour swatches agree with the stored
+     * ones. Roles present in only one side are ignored. Returns 0 when the
+     * live board has no swatches (Auto-Snap geometry alone).
+     */
+    fun colorAgreementBonus(live: BoardCalibrationProfile, stored: BoardCalibrationProfile): Float {
+        val roles = listOf(
+            live.whiteColor to stored.whiteColor,
+            live.blackColor to stored.blackColor,
+            live.queenColor to stored.queenColor,
+            live.strikerColor to stored.strikerColor
+        )
+        var total = 0f
+        var count = 0
+        for ((liveColor, storedColor) in roles) {
+            if (liveColor == null || storedColor == null) continue
+            total += colorDistance(liveColor, storedColor)
+            count++
+        }
+        if (count == 0) return 0f
+        return ((1f - total / count) * 0.05f).coerceIn(0f, 0.05f)
+    }
+
+    /** Normalised HSV distance between two swatches (0 = identical). */
+    fun colorDistance(a: CalibratedHsvColor, b: CalibratedHsvColor): Float {
+        val hueDiff = run {
+            val raw = abs(a.h - b.h) % 360f
+            (if (raw > 180f) 360f - raw else raw) / 180f
+        }
+        return (hueDiff * 0.5f + abs(a.s - b.s) * 0.25f + abs(a.v - b.v) * 0.25f)
+            .coerceIn(0f, 1f)
     }
 }
