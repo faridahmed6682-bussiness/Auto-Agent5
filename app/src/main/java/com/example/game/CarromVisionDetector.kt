@@ -2,6 +2,7 @@ package com.example.game
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import com.example.agent.CarromDifficulty
 import kotlin.math.abs
 
 sealed interface CarromVisionOutcome {
@@ -14,7 +15,9 @@ sealed interface CarromVisionOutcome {
         val detectedStriker: CarromPiece?,
         val board: CarromBoardLayout,
         val detectedSliderKnob: Point2D? = null,
-        val boardPieces: List<CarromPiece> = emptyList()
+        val boardPieces: List<CarromPiece> = emptyList(),
+        // True when the "your turn" glow halo was seen on the bottom baseline.
+        val turnBanner: Boolean = false
     ) : CarromVisionOutcome
     data class NeedsAiVision(
         val diagnostic: String,
@@ -64,7 +67,8 @@ object CarromVisionDetector {
         queenPendingCover: Boolean = false,
         isLiveStream: Boolean = false,
         calibrationOverride: BoardCalibrationProfile? = null,
-        isTurnActive: Boolean = false
+        isTurnActive: Boolean = false,
+        difficulty: CarromDifficulty = CarromDifficulty.MEDIUM
     ): CarromVisionOutcome {
         if (screenshot == null || screenshot.width < 120 || screenshot.height < 120) {
             return CarromVisionOutcome.NeedsAiVision("No screenshot available for Carrom solver.")
@@ -237,6 +241,7 @@ object CarromVisionDetector {
         // turn never started. After the wait budget, assume it IS our turn and
         // play from the baseline centre instead of sitting still.
         var fallbackStriker: CarromPiece? = null
+        var turnBannerDetected = false
         if (strikerPiece == null && sliderKnobPx == null) {
             val detectedTopStriker = detectTopStrikerOnBaseline(
                 bitmap = screenshot,
@@ -249,10 +254,24 @@ object CarromVisionDetector {
                 strikerRadiusPx = strikerRadius,
                 useSubPixelRefinement = false
             )
-            val maxTurnWaitCycles = if (detectedTopStriker != null) {
-                if (isLiveStream) 36 else 12
-            } else {
-                if (isLiveStream) 9 else 3
+            // Second turn signal: Carrom Pool draws a pulsing green/yellow
+            // "your turn" glow halo around the bottom striker while it is OUR
+            // turn. If the halo is visible and no opponent striker is on the
+            // top baseline, it is our turn right now — do not burn the wait
+            // budget, play immediately. This only accelerates the fallback
+            // assumption below; it never fires a shot by itself.
+            turnBannerDetected = detectedTopStriker == null && detectBottomTurnGlow(
+                bitmap = screenshot,
+                boardLeft = boardBmLeft,
+                boardTop = boardBmTop,
+                boardRight = boardBmRight,
+                boardBottom = boardBmBottom,
+                baselineFraction = baselineFraction
+            )
+            val maxTurnWaitCycles = when {
+                turnBannerDetected -> 0
+                detectedTopStriker != null -> if (isLiveStream) 36 else 12
+                else -> if (isLiveStream) 9 else 3
             }
             if (consecutiveOfflineWaits < maxTurnWaitCycles) {
                 val reason = if (detectedTopStriker != null) {
@@ -314,10 +333,19 @@ object CarromVisionDetector {
             shotMemory = shotMemory,
             usePhysicsRollout = usePhysicsRollout,
             isFreestyle = isFreestyle,
-            queenPendingCover = queenPendingCover
+            queenPendingCover = queenPendingCover,
+            difficulty = difficulty
         )
 
-        val finalSolution = if (solution != null && solution.confidenceScore >= 0.45f) {
+        // Difficulty shifts the acceptance bar for the first solution, but a
+        // physics-verified sure shot is always accepted regardless of level.
+        val diffOffset = when (difficulty) {
+            CarromDifficulty.EASY -> -0.12f
+            CarromDifficulty.MEDIUM -> 0f
+            CarromDifficulty.HARD -> 0.08f
+        }
+        val acceptConf = (0.45f + diffOffset).coerceIn(0.30f, 0.55f)
+        val finalSolution = if (solution != null && (solution.confidenceScore >= acceptConf || solution.isSureShot)) {
             solution
         } else if (effectiveStriker != null && promoted.count { it.color != CoinColor.STRIKER } >= 1) {
             // Own striker or slider is confirmed on bottom baseline: ALWAYS solve safest/emergency shot within 5s rather than stalling
@@ -331,20 +359,22 @@ object CarromVisionDetector {
                 shotMemory = shotMemory,
                 usePhysicsRollout = usePhysicsRollout,
                 isFreestyle = isFreestyle,
-                queenPendingCover = queenPendingCover
+                queenPendingCover = queenPendingCover,
+                difficulty = difficulty
             ) ?: solution
         } else {
             solution
         }
 
-        val minAcceptConf = if (effectiveStriker != null) 0.15f else 0.48f
-        return if (finalSolution != null && finalSolution.confidenceScore >= minAcceptConf) {
+        val minAcceptConf = if (effectiveStriker != null) 0.15f else (0.48f + diffOffset).coerceIn(0.30f, 0.56f)
+        return if (finalSolution != null && (finalSolution.confidenceScore >= minAcceptConf || finalSolution.isSureShot)) {
             CarromVisionOutcome.SolvedShot(
                 solution = finalSolution,
                 detectedStriker = effectiveStriker,
                 board = boardLayout,
                 detectedSliderKnob = sliderKnobPx,
-                boardPieces = promoted
+                boardPieces = promoted,
+                turnBanner = turnBannerDetected
             )
         } else {
             val myTargetsCount = if (isFreestyle) {
@@ -1207,6 +1237,57 @@ object CarromVisionDetector {
         }
 
         return detected
+    }
+
+    /**
+     * Second "whose turn is it" signal: Carrom Pool draws a pulsing
+     * green/yellow glow halo around the bottom striker while it is OUR turn.
+     * Scans the baseline band for dense, wide green/yellow glow pixels.
+     * Conservative on purpose: a single coin sitting on the baseline is small
+     * and narrow, so it cannot reach both the sample-count and the width
+     * threshold at once. Only used to skip the wait budget when no opponent
+     * striker is visible on the top baseline — never to fire a shot alone.
+     */
+    private fun detectBottomTurnGlow(
+        bitmap: Bitmap,
+        boardLeft: Int,
+        boardTop: Int,
+        boardRight: Int,
+        boardBottom: Int,
+        baselineFraction: Float
+    ): Boolean {
+        val bw = (boardRight - boardLeft).coerceAtLeast(40)
+        val bh = (boardBottom - boardTop).coerceAtLeast(40)
+        val scanLeft = (boardLeft + (bw * 0.14f).toInt()).coerceIn(0, bitmap.width - 2)
+        val scanRight = (boardLeft + (bw * 0.86f).toInt()).coerceIn(scanLeft + 2, bitmap.width - 1)
+        val scanTop = (boardTop + (bh * (baselineFraction - 0.085f)).toInt()).coerceIn(0, bitmap.height - 2)
+        val scanBottom = (boardTop + (bh * (baselineFraction + 0.085f)).toInt()).coerceIn(scanTop + 2, bitmap.height - 1)
+        val cols = ((scanRight - scanLeft) / SAMPLE_STEP).coerceAtLeast(1)
+        val rows = ((scanBottom - scanTop) / SAMPLE_STEP).coerceAtLeast(1)
+        if (cols < 4 || rows < 3) return false
+
+        val hsv = FloatArray(3)
+        var glowSamples = 0
+        var minGlowX = Int.MAX_VALUE
+        var maxGlowX = Int.MIN_VALUE
+        for (r in 0 until rows) {
+            val py = (scanTop + r * SAMPLE_STEP).coerceIn(0, bitmap.height - 1)
+            for (c in 0 until cols) {
+                val px = (scanLeft + c * SAMPLE_STEP).coerceIn(0, bitmap.width - 1)
+                rgbToHsv(bitmap.getPixel(px, py), hsv)
+                val h = hsv[0]
+                val s = hsv[1]
+                val v = hsv[2]
+                val isGlow = (h in 85f..155f && s >= 0.42f && v >= 0.42f) ||
+                    (h in 36f..62f && s >= 0.56f && v >= 0.70f)
+                if (isGlow) {
+                    glowSamples++
+                    if (px < minGlowX) minGlowX = px
+                    if (px > maxGlowX) maxGlowX = px
+                }
+            }
+        }
+        return glowSamples >= 120 && (maxGlowX - minGlowX) >= 56
     }
 
     private fun detectVividStrikerOnBand(

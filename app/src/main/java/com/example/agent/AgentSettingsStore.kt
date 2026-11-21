@@ -35,6 +35,7 @@ class AgentSettingsStore(private val context: Context) {
         val USE_ZERO_API_ACTION_CACHE = booleanPreferencesKey("use_zero_api_action_cache")
         val CARROM_PRECISION_SOLVER = booleanPreferencesKey("carrom_precision_solver")
         val CARROM_RULE_MODE = stringPreferencesKey("carrom_rule_mode")
+        val CARROM_DIFFICULTY = stringPreferencesKey("carrom_difficulty")
         val USE_PHYSICS_ROLLOUT = booleanPreferencesKey("use_physics_rollout")
         val USE_SUBPIXEL_CIRCLE_REFINEMENT = booleanPreferencesKey("use_subpixel_circle_refinement")
         val USE_CLOSED_LOOP_SLIDER_VERIFY = booleanPreferencesKey("use_closed_loop_slider_verify")
@@ -79,6 +80,7 @@ class AgentSettingsStore(private val context: Context) {
             prefs[Keys.USE_ZERO_API_ACTION_CACHE] = updated.useZeroApiActionCache
             prefs[Keys.CARROM_PRECISION_SOLVER] = updated.carromPrecisionSolver
             prefs[Keys.CARROM_RULE_MODE] = updated.carromRuleMode.name
+            prefs[Keys.CARROM_DIFFICULTY] = updated.carromDifficulty.name
             prefs[Keys.USE_PHYSICS_ROLLOUT] = updated.usePhysicsRollout
             prefs[Keys.USE_SUBPIXEL_CIRCLE_REFINEMENT] = updated.useSubPixelCircleRefinement
             prefs[Keys.USE_CLOSED_LOOP_SLIDER_VERIFY] = updated.useClosedLoopSliderVerify
@@ -123,6 +125,10 @@ class AgentSettingsStore(private val context: Context) {
             ?.let { runCatching { CarromRuleMode.valueOf(it) }.getOrNull() }
             ?: CarromRuleMode.FREESTYLE
 
+        val carromDifficulty = prefs[Keys.CARROM_DIFFICULTY]
+            ?.let { runCatching { CarromDifficulty.valueOf(it) }.getOrNull() }
+            ?: CarromDifficulty.MEDIUM
+
         return AgentSettings(
             aiProvider = provider,
             googleAiStudioApiKey = prefs[Keys.GOOGLE_AI_STUDIO_KEY].orEmpty(),
@@ -140,6 +146,7 @@ class AgentSettingsStore(private val context: Context) {
             useZeroApiActionCache = prefs[Keys.USE_ZERO_API_ACTION_CACHE] ?: true,
             carromPrecisionSolver = prefs[Keys.CARROM_PRECISION_SOLVER] ?: true,
             carromRuleMode = carromRuleMode,
+            carromDifficulty = carromDifficulty,
             usePhysicsRollout = prefs[Keys.USE_PHYSICS_ROLLOUT] ?: true,
             useSubPixelCircleRefinement = prefs[Keys.USE_SUBPIXEL_CIRCLE_REFINEMENT] ?: true,
             useClosedLoopSliderVerify = prefs[Keys.USE_CLOSED_LOOP_SLIDER_VERIFY] ?: true,

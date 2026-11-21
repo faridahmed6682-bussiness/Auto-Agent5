@@ -1,5 +1,6 @@
 package com.example.game
 
+import com.example.agent.CarromDifficulty
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.acos
@@ -73,7 +74,12 @@ data class CarromShotSolution(
     val rejectedDueToCollisionOrFoul: Boolean = false,
     val powerStyle: CarromPowerStyle = CarromPowerStyle.MEDIUM,
     val confidenceScore: Float,
-    val reason: String
+    val reason: String,
+    // Total shot path length (striker -> coin -> pocket) in px and the pull
+    // multiplier actually used, so the caller can record the real geometry +
+    // power into shot memory for distance-banded learning.
+    val totalDistance: Float = 0f,
+    val pullMultiplier: Float = 1.0f
 )
 
 data class PocketZonePlan(
@@ -178,7 +184,8 @@ object CarromGeometrySolver {
         shotMemory: CarromMemoryData? = null,
         usePhysicsRollout: Boolean = true,
         isFreestyle: Boolean = false,
-        queenPendingCover: Boolean = false
+        queenPendingCover: Boolean = false,
+        difficulty: CarromDifficulty = CarromDifficulty.MEDIUM
     ): CarromShotSolution? {
         if (board.pockets.size < 4) return null
 
@@ -195,6 +202,15 @@ object CarromGeometrySolver {
             }
         }
         if (targetPieces.isEmpty()) return null
+
+        // Difficulty shifts the confidence floors for accepting a shot:
+        // EASY takes riskier pots, MEDIUM keeps the tuned defaults, HARD only
+        // takes clearly better shots. All callers default to MEDIUM (offset 0).
+        val diffOffset = when (difficulty) {
+            CarromDifficulty.EASY -> -0.12f
+            CarromDifficulty.MEDIUM -> 0f
+            CarromDifficulty.HARD -> 0.08f
+        }
 
         val obstacles = pieces.filter { it.color != CoinColor.STRIKER }
         val strikerCandidates = buildStrikerCandidates(
@@ -277,7 +293,9 @@ object CarromGeometrySolver {
                         continue
                     }
 
-                    val learnedPowerScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutAngleDeg) ?: 1.0f
+                    // Distance-banded learned power: same pocket + cut needs
+                    // different power at short vs long range.
+                    val learnedPowerScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutAngleDeg, distRatio) ?: 1.0f
                     val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
                     val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
                     val baseMult = if (isHanger) 0.85f else 1.0f
@@ -329,12 +347,14 @@ object CarromGeometrySolver {
 
                     val hangerBonus = if (isHanger) 0.16f else 0f
                     val planAndValueBonus = pocketPlanBonus(board, coin, pocketIdx, isFreestyle)
-                    val coverBonus = if (queenPendingCover && coin.color == myCoinColor) 0.14f else 0f
+                    // Queen cover is urgent: an uncovered queen returns to the
+                    // board, so a cover pot is worth much more than a normal pot.
+                    val coverBonus = if (queenPendingCover && coin.color == myCoinColor) 0.22f else 0f
                     val angleScore = 1f - (cutAngleDeg / 74f) * 0.55f
                     val distScore = 1f - ((distCoinPocket + distStrikerGhost) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
                     val isCurrentStrikerPos = existingStriker != null && abs(strikerPos.x - existingStriker.center.x) < 18f
                     val existingBonus = if (isCurrentStrikerPos) (0.14f + inPlaceAdj).coerceIn(0.02f, 0.28f) else 0f
-                    val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutAngleDeg) ?: 0f
+                    val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutAngleDeg, distRatio) ?: 0f
                     val trainingBoost = (trainingMatch?.matchScore ?: 0f) * 0.18f
                     val normStrikerX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
                     val heatmapPenalty = (shotMemory?.scratchHeatmap?.riskFor(pocketIdx, cutAngleDeg, normStrikerX) ?: 0f) * 0.35f
@@ -408,7 +428,9 @@ object CarromGeometrySolver {
                             isTrainingMatched = trainingMatch != null,
                             powerStyle = powerStyle,
                             confidenceScore = score,
-                            reason = "$shotLabel ${coin.color.name} (${powerStyle.label}) cut=${cutAngleDeg.toInt()}° -> $pocketLabel"
+                            reason = "$shotLabel ${coin.color.name} (${powerStyle.label}) cut=${cutAngleDeg.toInt()}° -> $pocketLabel",
+                            totalDistance = distStrikerGhost + distCoinPocket,
+                            pullMultiplier = effectiveMult
                         )
                     }
                 }
@@ -458,7 +480,14 @@ object CarromGeometrySolver {
             }
         }
 
-        if (!usePhysicsRollout && bestDirect != null && bestDirect.confidenceScore >= 0.58f) {
+        if (!usePhysicsRollout && bestDirect != null && bestDirect.confidenceScore >= (0.58f + diffOffset)) {
+            return bestDirect
+        }
+
+        // Queen-cover urgency: when the queen must be covered, take any direct
+        // pot of our own coin (even a modest-confidence one) instead of
+        // falling through to bank/combo/break shots that cannot cover her.
+        if (queenPendingCover && bestDirect != null && bestDirect.confidenceScore >= 0.42f) {
             return bestDirect
         }
 
@@ -505,7 +534,7 @@ object CarromGeometrySolver {
                 if (bestDirect.confidenceScore >= bestBank.confidenceScore) bestDirect else bestBank
             else -> bestDirect ?: bestBank
         }
-        if (!usePhysicsRollout && bestDirectOrBank != null && bestDirectOrBank.confidenceScore >= 0.52f) {
+        if (!usePhysicsRollout && bestDirectOrBank != null && bestDirectOrBank.confidenceScore >= (0.52f + diffOffset)) {
             return bestDirectOrBank
         }
 
@@ -533,7 +562,7 @@ object CarromGeometrySolver {
                 shotMemory = shotMemory,
                 isFreestyle = isFreestyle
             )
-            if (verifiedCombo != null && (verifiedCombo.isSureShot || (!verifiedCombo.rejectedDueToCollisionOrFoul && verifiedCombo.confidenceScore >= 0.52f))) {
+            if (verifiedCombo != null && (verifiedCombo.isSureShot || (!verifiedCombo.rejectedDueToCollisionOrFoul && verifiedCombo.confidenceScore >= (0.52f + diffOffset)))) {
                 return verifiedCombo
             }
             // Training-data calibration fallback: if training power/bias prevented a Sure Shot, re-test with neutral engine power (still obeying foul blacklists!)
@@ -560,15 +589,15 @@ object CarromGeometrySolver {
                 if (engineFallbackShot != null && engineFallbackShot.isSureShot) {
                     return engineFallbackShot
                 }
-                if (bestNonSureDirectVerified != null && bestNonSureDirectVerified.confidenceScore >= 0.50f) {
+                if (bestNonSureDirectVerified != null && bestNonSureDirectVerified.confidenceScore >= (0.50f + diffOffset)) {
                     return bestNonSureDirectVerified
                 }
-                if (engineFallbackShot != null && !engineFallbackShot.rejectedDueToCollisionOrFoul && engineFallbackShot.confidenceScore >= 0.50f) {
+                if (engineFallbackShot != null && !engineFallbackShot.rejectedDueToCollisionOrFoul && engineFallbackShot.confidenceScore >= (0.50f + diffOffset)) {
                     return engineFallbackShot
                 }
             }
         }
-        if (usePhysicsRollout && bestNonSureDirectVerified != null && bestNonSureDirectVerified.confidenceScore >= 0.50f) {
+        if (usePhysicsRollout && bestNonSureDirectVerified != null && bestNonSureDirectVerified.confidenceScore >= (0.50f + diffOffset)) {
             return bestNonSureDirectVerified
         }
         if (!usePhysicsRollout) {
@@ -683,7 +712,7 @@ object CarromGeometrySolver {
                     if (!clearCoinToPocket && !clearStrikerToGhost) continue
 
                     val isHanger = distCoinPocket <= board.coinRadiusPx * 5.2f
-                    val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg) ?: 1.0f
+                    val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg, distRatio) ?: 1.0f
                     val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
                     val distRatio = ((distSg + distCoinPocket) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
 
@@ -850,7 +879,8 @@ object CarromGeometrySolver {
         shotMemory: CarromMemoryData?,
         usePhysicsRollout: Boolean = true,
         isFreestyle: Boolean = false,
-        queenPendingCover: Boolean = false
+        queenPendingCover: Boolean = false,
+        difficulty: CarromDifficulty = CarromDifficulty.MEDIUM
     ): CarromShotSolution? {
         val inPlaceAttempt = solveBestShot(
             board = board,
@@ -863,7 +893,8 @@ object CarromGeometrySolver {
             shotMemory = shotMemory,
             usePhysicsRollout = usePhysicsRollout,
             isFreestyle = isFreestyle,
-            queenPendingCover = queenPendingCover
+            queenPendingCover = queenPendingCover,
+            difficulty = difficulty
         )
         if (inPlaceAttempt != null && !inPlaceAttempt.rejectedDueToCollisionOrFoul) {
             return inPlaceAttempt
@@ -1070,7 +1101,9 @@ object CarromGeometrySolver {
             } else {
                 sim.physicsCompositeScore
             },
-            reason = "$kindTag ${winner.targetCoin.color.name} (${powerStyle.label}) cut=${winner.cutAngleDeg.toInt()}° -> $pocketLabel [Sim ${sim.rolloutsRun}x/${sim.elapsedMs}ms, rob=${robPct}%$kissTag]"
+            reason = "$kindTag ${winner.targetCoin.color.name} (${powerStyle.label}) cut=${winner.cutAngleDeg.toInt()}° -> $pocketLabel [Sim ${sim.rolloutsRun}x/${sim.elapsedMs}ms, rob=${robPct}%$kissTag]",
+            totalDistance = winner.totalDistance,
+            pullMultiplier = effectiveMult
         )
     }
 
@@ -1122,7 +1155,8 @@ object CarromGeometrySolver {
                             continue
                         }
 
-                        val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg) ?: 1.0f
+                        val bankDistRatio = ((sg.length() + toMirror.length()) / board.width.coerceAtLeast(1f)).coerceIn(0.15f, 1.8f)
+                        val learnedScale = shotMemory?.learnedPowerScaleFor(pocketIdx, cutDeg, bankDistRatio) ?: 1.0f
                         val effectiveMult = 1.24f * learnedScale
                         val bankPowerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
                         if (shotMemory?.isFoulBlacklisted(
@@ -1137,7 +1171,7 @@ object CarromGeometrySolver {
                             continue
                         }
 
-                        val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutDeg) ?: 0f
+                        val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutDeg, bankDistRatio) ?: 0f
                         val normStrikerX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
                         val heatmapPenalty = (shotMemory?.scratchHeatmap?.riskFor(pocketIdx, cutDeg, normStrikerX) ?: 0f) * 0.25f
                         val bottomBankBoost = if (zonePlan.preferBankForBottomPockets && pocketIdx == zonePlan.primaryPocketIndex) 0.08f else 0f

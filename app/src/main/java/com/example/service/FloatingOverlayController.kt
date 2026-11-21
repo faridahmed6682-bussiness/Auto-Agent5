@@ -132,6 +132,14 @@ class FloatingOverlayController(private val context: Context) {
             val totalCoins = activeHud.whiteCount + activeHud.blackCount + (if (activeHud.queenVisible) 1 else 0)
             val lockIcon = if (activeHud.strikerLocked) "✓" else "…"
             val traceLine = buildString {
+                // Diagnostic first line: which step the bot is on (WAITING /
+                // NEEDS AI / SURE SHOT / ...) and why, so a "bot does nothing"
+                // report can be diagnosed from the screen.
+                append("[${activeHud.stage.badge}]")
+                if (activeHud.detail.isNotBlank()) {
+                    append(" ${activeHud.detail}")
+                }
+                append('\n')
                 append("Trace ${totalCoins} (W${activeHud.whiteCount} B${activeHud.blackCount}")
                 if (activeHud.queenVisible) append(" Q1")
                 append(") • Striker $lockIcon")
@@ -255,7 +263,7 @@ class FloatingOverlayController(private val context: Context) {
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.MONOSPACE
-            maxLines = 2
+            maxLines = 4
             ellipsize = TextUtils.TruncateAt.END
             visibility = View.GONE
             setPadding(0, 0, 0, dp(6))

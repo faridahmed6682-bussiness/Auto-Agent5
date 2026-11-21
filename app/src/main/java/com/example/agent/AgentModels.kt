@@ -84,6 +84,22 @@ enum class CarromRuleMode(val label: String) {
     BLACK_ONLY("Disc Pool: Black")
 }
 
+/**
+ * Carrom auto-play difficulty: caps which shots the solver will take by
+ * confidence, and how much human-like aim error is added to the shot.
+ * HARD only takes high-confidence shots and adds no aim error; EASY accepts
+ * riskier pots and adds up to +/-3 degrees of aim error.
+ */
+enum class CarromDifficulty(
+    val label: String,
+    val minConfidence: Float,
+    val aimErrorDeg: Float
+) {
+    EASY("Easy — relaxed", 0.38f, 3.0f),
+    MEDIUM("Medium — balanced", 0.50f, 1.5f),
+    HARD("Hard — sure shots only", 0.62f, 0.0f)
+}
+
 enum class AgentActionType {
     TAP,
     DRAG,
@@ -394,6 +410,7 @@ data class AgentSettings(
     val useZeroApiActionCache: Boolean = true,
     val carromPrecisionSolver: Boolean = true,
     val carromRuleMode: CarromRuleMode = CarromRuleMode.FREESTYLE,
+    val carromDifficulty: CarromDifficulty = CarromDifficulty.MEDIUM,
     val usePhysicsRollout: Boolean = true,
     val useSubPixelCircleRefinement: Boolean = true,
     val useClosedLoopSliderVerify: Boolean = true,

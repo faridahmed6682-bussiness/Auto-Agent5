@@ -36,6 +36,26 @@ enum class CarromAngleBucket(val label: String) {
     }
 }
 
+/**
+ * Total shot distance (striker -> coin -> pocket) as a fraction of board width.
+ * Learned power/confidence is tracked per (pocket, angle, distance) band, because
+ * the same pocket + cut needs very different power at short vs long range.
+ * distRatio comes from PendingCarromShotRecord (0.15..1.8, ~0.7 typical).
+ */
+enum class CarromDistanceBand(val label: String) {
+    SHORT("Short (<0.55)"),
+    MEDIUM("Medium (0.55-1.0)"),
+    LONG("Long (>1.0)");
+
+    companion object {
+        fun fromDistRatio(distRatio: Float): CarromDistanceBand = when {
+            distRatio < 0.55f -> SHORT
+            distRatio <= 1.0f -> MEDIUM
+            else -> LONG
+        }
+    }
+}
+
 enum class CarromPowerStyle(val label: String) {
     SOFT("Soft / Gentle"),
     MEDIUM("Medium"),
@@ -302,17 +322,38 @@ data class CarromMemoryData(
         }
         return spatialFouls >= 2 && spatialFouls > spatialClean + 1
     }
-    fun statsFor(pocketIndex: Int, cutAngleDeg: Float): PocketShotStats? {
+    fun statsFor(pocketIndex: Int, cutAngleDeg: Float, distRatio: Float = 0.7f): PocketShotStats? {
         val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
-        return statsByBucket[bucketKey(pocketIndex, bucket)]
+        // Exact (pocket, angle, distance-band) bucket first; fall back to the
+        // legacy unbanded key so stats learned before distance banding still count.
+        return statsByBucket[bucketKey(pocketIndex, bucket, distRatio)]
+            ?: statsByBucket["P${pocketIndex.coerceIn(0, 3)}_${bucket.name}"]
     }
 
-    fun learnedPowerScaleFor(pocketIndex: Int, cutAngleDeg: Float): Float {
-        return statsFor(pocketIndex, cutAngleDeg)?.learnedPowerScale ?: 1.0f
+    fun learnedPowerScaleFor(pocketIndex: Int, cutAngleDeg: Float, distRatio: Float = 0.7f): Float {
+        val exact = statsFor(pocketIndex, cutAngleDeg, distRatio)
+        if (exact != null && exact.attempts > 0) return exact.learnedPowerScale
+        // No data for this distance band yet: average the other bands of the
+        // same pocket + angle bucket (weighted by attempts) instead of 1.0.
+        val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
+        val siblings = statsByBucket.values.filter {
+            it.pocketIndex == pocketIndex.coerceIn(0, 3) && it.angleBucket == bucket && it.attempts > 0
+        }
+        if (siblings.isEmpty()) return 1.0f
+        val weighted = siblings.sumOf { it.learnedPowerScale.toDouble() * it.attempts }
+        val total = siblings.sumOf { it.attempts }
+        return (weighted / total.toDouble()).toFloat().coerceIn(0.72f, 1.38f)
     }
 
-    fun confidenceBiasFor(pocketIndex: Int, cutAngleDeg: Float): Float {
-        return statsFor(pocketIndex, cutAngleDeg)?.confidenceAdjustment() ?: 0f
+    fun confidenceBiasFor(pocketIndex: Int, cutAngleDeg: Float, distRatio: Float = 0.7f): Float {
+        val exact = statsFor(pocketIndex, cutAngleDeg, distRatio)
+        if (exact != null && exact.attempts > 0) return exact.confidenceAdjustment()
+        val bucket = CarromAngleBucket.fromAngle(cutAngleDeg)
+        val siblings = statsByBucket.values.filter {
+            it.pocketIndex == pocketIndex.coerceIn(0, 3) && it.angleBucket == bucket && it.attempts > 0
+        }
+        if (siblings.isEmpty()) return 0f
+        return siblings.map { it.confidenceAdjustment() }.average().toFloat().coerceIn(-0.24f, 0.20f)
     }
 
     fun needsExtraScratchGuard(): Boolean = straightFoulCount >= 1
@@ -536,8 +577,9 @@ data class CarromMemoryData(
     }
 
     companion object {
-        fun bucketKey(pocketIndex: Int, bucket: CarromAngleBucket): String {
-            return "P${pocketIndex.coerceIn(0, 3)}_${bucket.name}"
+        fun bucketKey(pocketIndex: Int, bucket: CarromAngleBucket, distRatio: Float = 0.7f): String {
+            val band = CarromDistanceBand.fromDistRatio(distRatio)
+            return "P${pocketIndex.coerceIn(0, 3)}_${bucket.name}_${band.name}"
         }
 
         fun strikerSectorFor(strikerNormalizedX: Float): String = when {
@@ -792,7 +834,10 @@ class CarromShotMemoryStore(context: Context) {
             val pocketIdx = pendingShot.pocketIndex.coerceIn(0, 3)
             val pocketLabel = CarromMemoryData.pocketName(pocketIdx)
             val angleBucket = CarromAngleBucket.fromAngle(pendingShot.cutAngleDeg)
-            val key = CarromMemoryData.bucketKey(pocketIdx, angleBucket)
+            // Distance-banded key: the same pocket + cut learns different power at
+            // short vs long range. pendingShot.distRatio is the real recorded ratio
+            // (striker -> coin -> pocket) / board width, defaulting to 0.7 (Medium).
+            val key = CarromMemoryData.bucketKey(pocketIdx, angleBucket, pendingShot.distRatio)
             val existingStats = current.statsByBucket[key] ?: PocketShotStats(
                 key = key,
                 pocketIndex = pocketIdx,

@@ -1,5 +1,6 @@
 package com.example.game
 
+import com.example.agent.CarromDifficulty
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -9,7 +10,11 @@ enum class TurnProbeStage(val badge: String) {
     LOCKED_SURE_SHOT("SURE SHOT"),
     CAROM_SURE_SHOT("CAROM SURE"),
     FALLBACK_FIRE("5s MUST SHOOT"),
-    WATCH_TRAINING("WATCH TRAIN")
+    WATCH_TRAINING("WATCH TRAIN"),
+    // Diagnostic stages: shown on the HUD even when no turn is active, so a
+    // "bot does nothing" report can be diagnosed from the screen.
+    WAITING("WAITING"),
+    NEEDS_AI("NEEDS AI")
 }
 
 data class CarromAimVisualData(
@@ -339,7 +344,8 @@ class CarromTurnMemory {
         usePhysicsRollout: Boolean,
         fallbackSolution: CarromShotSolution?,
         isFreestyle: Boolean = false,
-        queenPendingCover: Boolean = false
+        queenPendingCover: Boolean = false,
+        difficulty: CarromDifficulty = CarromDifficulty.MEDIUM
     ): CarromShotSolution? {
         val consensusPieces = buildConsensusPieces(latestPieces, board.coinRadiusPx)
         val anchorStriker = striker ?: run {
@@ -360,7 +366,8 @@ class CarromTurnMemory {
             shotMemory = shotMemory,
             usePhysicsRollout = usePhysicsRollout,
             isFreestyle = isFreestyle,
-            queenPendingCover = queenPendingCover
+            queenPendingCover = queenPendingCover,
+            difficulty = difficulty
         )
         if (solved != null) return solved
 
@@ -391,7 +398,10 @@ class CarromTurnMemory {
         strikerPos: Point2D? = null,
         solution: CarromShotSolution? = null,
         dragEndOverride: Point2D? = null,
-        aimSummary: String = ""
+        aimSummary: String = "",
+        // Diagnostic stages (WAITING / NEEDS_AI) have no active turn, but the
+        // HUD must still show so the current step is visible on screen.
+        forceActive: Boolean = false
     ): CarromTurnHudState {
         val nonStriker = tracedPieces.filter { it.color != CoinColor.STRIKER }
         val whiteCount = nonStriker.count { it.color == CoinColor.WHITE }
@@ -416,7 +426,7 @@ class CarromTurnMemory {
             null
         }
         return CarromTurnHudState(
-            isActive = isTurnActive,
+            isActive = isTurnActive || forceActive,
             elapsedSec = elapsedMs(nowMs) / 1000f,
             maxSec = MAX_TURN_BUDGET_MS / 1000f,
             probeNumber = (_sliderMovesThisTurn + 1).coerceAtMost(MAX_BASELINE_PROBES),

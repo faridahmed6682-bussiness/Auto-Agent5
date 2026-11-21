@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.random.Random
 import java.lang.ref.WeakReference
 
 private const val TAG = "AgentCoordinator"
@@ -1146,7 +1147,8 @@ object AgentCoordinator {
                                 isFreestyle = isFreestyleMode,
                                 queenPendingCover = queenPendingCover,
                                 isLiveStream = isLiveStream,
-                                isTurnActive = carromTurnMemory.isTurnActive
+                                isTurnActive = carromTurnMemory.isTurnActive,
+                                difficulty = currentSettings.carromDifficulty
                             )
 
                             // Evaluate the previous Carrom shot once coins have stopped moving
@@ -1241,7 +1243,16 @@ object AgentCoordinator {
                                     pendingSliderVerify = null
                                     if (!carromTurnMemory.isTurnActive) {
                                         carromTurnMemory.resetTurn()
-                                        _carromTurnHud.value = null
+                                        // Diagnostic HUD: show the wait step on screen instead
+                                        // of hiding the HUD, so a "bot does nothing" report can
+                                        // be diagnosed from the phone (outcome + reason visible).
+                                        _carromTurnHud.value = carromTurnMemory.buildHudState(
+                                            nowMs = nowCarromMs,
+                                            stage = TurnProbeStage.WAITING,
+                                            detail = outcome.reason.take(90),
+                                            tracedPieces = outcome.boardPieces,
+                                            forceActive = true
+                                        )
                                     }
                                     PlannedAction(
                                         actionType = AgentActionType.WAIT,
@@ -1349,7 +1360,8 @@ object AgentCoordinator {
                                             shotMemory = currentCarromMem,
                                             usePhysicsRollout = currentSettings.usePhysicsRollout,
                                             isFreestyle = isFreestyleMode,
-                                            queenPendingCover = queenPendingCover
+                                            queenPendingCover = queenPendingCover,
+                                            difficulty = currentSettings.carromDifficulty
                                         )
                                     } else {
                                         null
@@ -1445,7 +1457,10 @@ object AgentCoordinator {
                                             y = sliderKnob.y.toInt(),
                                             endX = targetKnobEndX,
                                             endY = sliderKnob.y.toInt(),
-                                            durationMs = if (kotlin.math.abs(calibratedDelta) < 120f) 210L else 280L,
+                                            // Human-like timing: vary the slide duration slightly
+                                            // so the probe does not move like a metronome.
+                                            durationMs = (if (kotlin.math.abs(calibratedDelta) < 120f) 210L else 280L) +
+                                                Random.Default.nextLong(-25L, 26L),
                                             textToType = null,
                                             waitSeconds = null,
                                             memoryNote = "Turn Memory (${carromTurnMemory.scanCount} scans, ${carromTurnMemory.rejectedProbeCount} rejected, rem=${String.format(java.util.Locale.US, "%.1f", remSec)}s): probing spot #${carromTurnMemory.sliderMovesThisTurn}/${CarromTurnMemory.MAX_BASELINE_PROBES}",
@@ -1472,7 +1487,8 @@ object AgentCoordinator {
                                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
                                                 fallbackSolution = outcome.solution,
                                                 isFreestyle = isFreestyleMode,
-                                                queenPendingCover = queenPendingCover
+                                                queenPendingCover = queenPendingCover,
+                                                difficulty = currentSettings.carromDifficulty
                                             ) ?: outcome.solution
                                         }
 
@@ -1496,6 +1512,18 @@ object AgentCoordinator {
                                         val countSource = consensusPieces.ifEmpty { outcome.boardPieces }
                                         lastShotPrePieces = countSource
                                         lastShotAttemptStrikerX = shootStartX
+                                        // Record the REAL shot geometry for distance-banded
+                                        // learning: normalized coin position, true total path
+                                        // length (striker -> coin -> pocket) / board width, and
+                                        // the pull multiplier actually used for this shot.
+                                        val shotCoinNormX = ((finalSol.targetCoin.center.x - outcome.board.left) / outcome.board.width).coerceIn(0f, 1f)
+                                        val shotCoinNormY = ((finalSol.targetCoin.center.y - outcome.board.top) / outcome.board.height).coerceIn(0f, 1f)
+                                        val shotDistRatio = if (finalSol.totalDistance > 0f) {
+                                            (finalSol.totalDistance / outcome.board.width).coerceIn(0.15f, 1.8f)
+                                        } else {
+                                            ((kotlin.math.hypot(finalSol.ghostBall.x - shootStartX, finalSol.ghostBall.y - shootStartY) +
+                                                kotlin.math.hypot(finalSol.targetPocket.x - finalSol.targetCoin.center.x, finalSol.targetPocket.y - finalSol.targetCoin.center.y)) / outcome.board.width).coerceIn(0.15f, 1.8f)
+                                        }
                                         if (countSource.isNotEmpty()) {
                                             nextPendingCarromShotCandidate = PendingCarromShotRecord(
                                                 myCoinColor = myCarromCoinColor,
@@ -1511,12 +1539,28 @@ object AgentCoordinator {
                                                 isComboShot = finalSol.isComboShot,
                                                 isBreakShot = finalSol.isBreakShot,
                                                 preCounts = CarromShotMemoryStore.countBoardPieces(countSource, myCarromCoinColor),
-                                                isFreestyle = isFreestyleMode
+                                                isFreestyle = isFreestyleMode,
+                                                coinNormX = shotCoinNormX,
+                                                coinNormY = shotCoinNormY,
+                                                distRatio = shotDistRatio,
+                                                observedPullScale = finalSol.pullMultiplier
                                             )
                                         }
 
-                                        val dx = finalSol.dragEnd.x - finalSol.strikerPos.x
-                                        val dy = finalSol.dragEnd.y - finalSol.strikerPos.y
+                                        val rawDx = finalSol.dragEnd.x - finalSol.strikerPos.x
+                                        val rawDy = finalSol.dragEnd.y - finalSol.strikerPos.y
+                                        // Difficulty aim error: on Easy/Medium the pull vector is
+                                        // rotated by a small random angle so the play looks
+                                        // human; Hard adds no error.
+                                        val aimErrDeg = currentSettings.carromDifficulty.aimErrorDeg
+                                        val (dx, dy) = if (aimErrDeg > 0f) {
+                                            val errRad = Math.toRadians((Random.Default.nextFloat() * 2f * aimErrDeg - aimErrDeg).toDouble()).toFloat()
+                                            val c = kotlin.math.cos(errRad)
+                                            val s = kotlin.math.sin(errRad)
+                                            (rawDx * c - rawDy * s) to (rawDx * s + rawDy * c)
+                                        } else {
+                                            rawDx to rawDy
+                                        }
                                         val minBoundX = 28f
                                         val maxBoundX = (snapshot.screenWidth - 28f).coerceAtLeast(29f)
                                         val minBoundY = 24f
@@ -1535,7 +1579,8 @@ object AgentCoordinator {
                                         val shootEndX = (shootStartX + dx * pullScale).toInt().coerceIn(minBoundX.toInt(), maxBoundX.toInt())
                                         val shootEndY = (shootStartY + dy * pullScale).toInt().coerceIn(minBoundY.toInt(), maxBoundY.toInt())
 
-                                        val finalAimSummary = "${finalSol.targetCoin.color.name} -> ${CarromMemoryData.pocketName(finalSol.pocketIndex)} (${finalSol.cutAngleDeg.toInt()}°) • ${finalSol.powerStyle.label}"
+                                        val finalAimSummary = "${finalSol.targetCoin.color.name} -> ${CarromMemoryData.pocketName(finalSol.pocketIndex)} (${finalSol.cutAngleDeg.toInt()}°) • ${finalSol.powerStyle.label} • ${(finalSol.confidenceScore * 100).toInt()}%" +
+                                            if (outcome.turnBanner) " • TURN ✓" else ""
                                         _carromTurnHud.value = carromTurnMemory.buildHudState(
                                             nowMs = nowCarromMs,
                                             stage = hudStage,
@@ -1548,6 +1593,15 @@ object AgentCoordinator {
                                             aimSummary = finalAimSummary
                                         )
 
+                                        // Human-like pre-shot pause (0.4-1.2s) when the turn
+                                        // clock allows it; skipped when time is short or this
+                                        // is the must-shoot fallback. Captured before resetTurn.
+                                        val remainingBeforeShotMs = carromTurnMemory.remainingMs(nowCarromMs)
+                                        val humanPauseMs = if (remainingBeforeShotMs > 2_500L && hudStage != TurnProbeStage.FALLBACK_FIRE) {
+                                            Random.Default.nextLong(400L, 1_201L)
+                                        } else {
+                                            0L
+                                        }
                                         val telemetry = carromTurnMemory.formatTurnTelemetry(nowCarromMs, finalSol)
                                         carromTurnMemory.resetTurn()
 
@@ -1557,11 +1611,15 @@ object AgentCoordinator {
                                             (shootEndY - shootStartY).toDouble()
                                         ).toFloat()
                                         val baseDurationMs = (360L + (pullDistPx * 0.45f).toLong()).coerceIn(370L, 520L)
-                                        val shotDurationMs = when (consecutiveUnregisteredCarromShots) {
+                                        // Human-like timing: vary the pull duration slightly so
+                                        // every shot does not take exactly the same time.
+                                        val humanJitterMs = Random.Default.nextLong(-45L, 46L)
+                                        val shotDurationMs = (when (consecutiveUnregisteredCarromShots) {
                                             1 -> (baseDurationMs + 60L).coerceAtMost(580L)
                                             2 -> (baseDurationMs + 100L).coerceAtMost(620L)
                                             else -> baseDurationMs
-                                        }
+                                        } + humanJitterMs).coerceIn(340L, 640L)
+                                        if (humanPauseMs > 0L) delay(humanPauseMs)
                                         PlannedAction(
                                             actionType = AgentActionType.DRAG,
                                             targetNodeId = null,
@@ -1582,7 +1640,15 @@ object AgentCoordinator {
                                     carromOfflineWaits = 0
                                     pendingSliderVerify = null
                                     carromTurnMemory.resetTurn()
-                                    _carromTurnHud.value = null
+                                    // Diagnostic HUD: keep the "needs AI vision" step visible
+                                    // on screen with its diagnostic instead of hiding the HUD.
+                                    _carromTurnHud.value = carromTurnMemory.buildHudState(
+                                        nowMs = nowCarromMs,
+                                        stage = TurnProbeStage.NEEDS_AI,
+                                        detail = outcome.diagnostic.take(90),
+                                        tracedPieces = outcome.boardPieces,
+                                        forceActive = true
+                                    )
                                     lastOutcomeHint = "[Carrom Local Vision: ${outcome.diagnostic}] $lastOutcomeHint"
                                     if (outcome.boardPieces.isNotEmpty()) {
                                         aiPreCarromCounts = CarromShotMemoryStore.countBoardPieces(outcome.boardPieces, myCarromCoinColor)

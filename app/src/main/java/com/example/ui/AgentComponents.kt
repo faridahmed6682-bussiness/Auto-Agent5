@@ -109,6 +109,7 @@ import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.ui.platform.LocalContext
 import com.example.agent.AiRoutingStrategy
 import com.example.agent.CachedActionEntry
+import com.example.agent.CarromDifficulty
 import com.example.agent.CarromRuleMode
 import com.example.agent.SafetyPolicyMode
 import com.example.agent.StepStatus
@@ -1835,7 +1836,9 @@ fun AgentOutcomeBanner(
                             TurnProbeStage.PROBING_SLIDER,
                             TurnProbeStage.PRE_SCAN,
                             TurnProbeStage.WATCH_TRAINING -> ElectricCyan
-                            TurnProbeStage.FALLBACK_FIRE -> AmberWarning
+                            TurnProbeStage.FALLBACK_FIRE,
+                            TurnProbeStage.WAITING,
+                            TurnProbeStage.NEEDS_AI -> AmberWarning
                         }
                         val clockColor = if (carromTurnHud.elapsedSec >= 5.5f) AmberWarning else CyberTeal
                         FlowRow(
@@ -1927,6 +1930,14 @@ fun AgentOutcomeBanner(
                                     )
                                 }
                             }
+                        }
+                        if (carromTurnHud.detail.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = carromTurnHud.detail,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary
+                            )
                         }
                         if (carromTurnHud.aimSummary.isNotBlank()) {
                             Spacer(modifier = Modifier.height(6.dp))
@@ -2586,6 +2597,42 @@ fun AgentSettingsSheet(
                     stringResource(R.string.settings_carrom_rule_freestyle_desc)
                 } else {
                     stringResource(R.string.settings_carrom_rule_discpool_desc)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary
+            )
+
+            Text(
+                text = "Carrom Difficulty",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CarromDifficulty.entries.forEach { difficulty ->
+                    FilterChip(
+                        selected = settings.carromDifficulty == difficulty,
+                        onClick = { onUpdate { it.copy(carromDifficulty = difficulty) } },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("carrom_difficulty_${difficulty.name.lowercase()}"),
+                        label = { Text(difficulty.label) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CyberTealDark,
+                            selectedLabelColor = CyberTeal
+                        )
+                    )
+                }
+            }
+
+            Text(
+                text = when (settings.carromDifficulty) {
+                    CarromDifficulty.HARD -> "Hard takes only high-confidence shots with no aim error."
+                    CarromDifficulty.EASY -> "Easy accepts riskier pots and adds up to ±3° aim error."
+                    CarromDifficulty.MEDIUM -> "Medium balances sure shots with a small ±1.5° aim error."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextSecondary
