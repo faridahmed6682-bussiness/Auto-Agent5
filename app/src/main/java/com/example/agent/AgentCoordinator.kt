@@ -1145,7 +1145,8 @@ object AgentCoordinator {
                                 useSubPixelRefinement = currentSettings.useSubPixelCircleRefinement,
                                 isFreestyle = isFreestyleMode,
                                 queenPendingCover = queenPendingCover,
-                                isLiveStream = isLiveStream
+                                isLiveStream = isLiveStream,
+                                isTurnActive = carromTurnMemory.isTurnActive
                             )
 
                             // Evaluate the previous Carrom shot once coins have stopped moving
@@ -1238,8 +1239,10 @@ object AgentCoordinator {
                                     carromOfflineWaits++
                                     isCarromOfflineWait = true
                                     pendingSliderVerify = null
-                                    carromTurnMemory.resetTurn()
-                                    _carromTurnHud.value = null
+                                    if (!carromTurnMemory.isTurnActive) {
+                                        carromTurnMemory.resetTurn()
+                                        _carromTurnHud.value = null
+                                    }
                                     PlannedAction(
                                         actionType = AgentActionType.WAIT,
                                         targetNodeId = null,
@@ -1357,6 +1360,7 @@ object AgentCoordinator {
                                     val minCorrectionPx = (outcome.board.width * 0.032f).coerceIn(18f, 34f)
                                     val needsClosedLoopCorrection = !isVerifiedSureHere &&
                                         canAffordSlide &&
+                                        carromTurnMemory.remainingMs(nowCarromMs) > 2_300L &&
                                         currentSettings.useClosedLoopSliderVerify &&
                                         verifyState != null &&
                                         verifyState.correctionAttempts < 1 &&
@@ -1469,7 +1473,7 @@ object AgentCoordinator {
                                                 fallbackSolution = outcome.solution,
                                                 isFreestyle = isFreestyleMode,
                                                 queenPendingCover = queenPendingCover
-                                            )
+                                            ) ?: outcome.solution
                                         }
 
                                         val hudStage = when {
@@ -1552,10 +1556,10 @@ object AgentCoordinator {
                                             (shootEndX - shootStartX).toDouble(),
                                             (shootEndY - shootStartY).toDouble()
                                         ).toFloat()
-                                        val baseDurationMs = (420L + (pullDistPx * 0.55f).toLong()).coerceIn(460L, 640L)
+                                        val baseDurationMs = (360L + (pullDistPx * 0.45f).toLong()).coerceIn(370L, 520L)
                                         val shotDurationMs = when (consecutiveUnregisteredCarromShots) {
-                                            1 -> (baseDurationMs + 80L).coerceAtMost(720L)
-                                            2 -> (baseDurationMs + 130L).coerceAtMost(760L)
+                                            1 -> (baseDurationMs + 60L).coerceAtMost(580L)
+                                            2 -> (baseDurationMs + 100L).coerceAtMost(620L)
                                             else -> baseDurationMs
                                         }
                                         PlannedAction(
@@ -1894,7 +1898,7 @@ object AgentCoordinator {
 
                     if (plannedAction.actionType == AgentActionType.WAIT) {
                         if (isCarromOfflineWait) {
-                            val fastWaitMs = if (LiveMediaProjectionCapturer.isLiveActive.value) 280L else 850L
+                            val fastWaitMs = if (LiveMediaProjectionCapturer.isLiveActive.value) 160L else 380L
                             _uiState.value = AgentUiState.Running(
                                 goal = goal,
                                 mode = mode,
@@ -2152,9 +2156,9 @@ object AgentCoordinator {
                         trace = trace.toList()
                     )
                     val effectiveDelayMs = when {
-                        usedLocalCarromSolver && didSlideCarromThisStep && LiveMediaProjectionCapturer.isLiveActive.value -> 85L
-                        usedLocalCarromSolver && didSlideCarromThisStep -> 130L
-                        LiveMediaProjectionCapturer.isLiveActive.value && usedLocalCarromSolver -> 460L
+                        usedLocalCarromSolver && didSlideCarromThisStep && LiveMediaProjectionCapturer.isLiveActive.value -> 65L
+                        usedLocalCarromSolver && didSlideCarromThisStep -> 100L
+                        LiveMediaProjectionCapturer.isLiveActive.value && usedLocalCarromSolver -> 420L
                         cacheMatch != null || launcherDecision != null -> minOf(currentSettings.stepDelayMs, 550L)
                         else -> currentSettings.stepDelayMs
                     }

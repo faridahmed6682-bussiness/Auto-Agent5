@@ -855,7 +855,7 @@ class ExampleRobolectricTest {
             missSimRes!!.second.isSureShot
         )
 
-        // Setup 3: Ranked top-4 side-to-side probe queue + 9s cutoff enforcement in CarromTurnMemory
+        // Setup 3: Ranked <=2 side-to-side probe queue + 5s cutoff enforcement in CarromTurnMemory
         val probeQueue = com.example.game.CarromGeometrySolver.buildRankedBaselineProbeQueue(
             board = board,
             pieces = pieces,
@@ -864,14 +864,26 @@ class ExampleRobolectricTest {
             shotMemory = null,
             maxProbes = com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES
         )
-        org.junit.Assert.assertTrue("Expected ranked baseline probes <= 4 and non-empty", probeQueue.size in 1..4)
+        org.junit.Assert.assertTrue("Expected ranked baseline probes <= 2 and non-empty", probeQueue.size in 1..2)
 
         val turnMemory = com.example.game.CarromTurnMemory()
         turnMemory.ensureTurnStarted(1_000L)
         turnMemory.initializeProbeQueueIfNeeded(probeQueue)
         turnMemory.markSpotRejected(striker.center.x, "collision-miss")
-        org.junit.Assert.assertTrue(turnMemory.canAffordAnotherSliderMove(7_200L, isLiveStreamActive = true))
-        org.junit.Assert.assertFalse(turnMemory.canAffordAnotherSliderMove(9_300L, isLiveStreamActive = true))
+        org.junit.Assert.assertTrue(turnMemory.canAffordAnotherSliderMove(3_400L, isLiveStreamActive = true))
+        org.junit.Assert.assertFalse(turnMemory.canAffordAnotherSliderMove(5_100L, isLiveStreamActive = true))
+        val guaranteedShot = turnMemory.solveCombinedFinalShot(
+            board = board,
+            latestPieces = pieces,
+            striker = striker,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            shotMemory = null,
+            usePhysicsRollout = true,
+            fallbackSolution = null
+        )
+        org.junit.Assert.assertNotNull("5s clock combined final shot MUST always produce a playable shot", guaranteedShot)
     }
 
     @Test

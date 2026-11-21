@@ -644,7 +644,7 @@ object CarromGeometrySolver {
                     val obstructionBias = if (clearCoinToPocket && clearStrikerToGhost) 0f else -0.18f
                     val queenBonus = if (coin.color == CoinColor.QUEEN) 0.09f else 0f
                     val hangerBonus = if (isHanger) 0.14f else 0f
-                    val trainingBoost = (trainingMatch?.matchScore ?: 0f) * 0.18f
+                    val trainingBoost = (trainingMatch?.matchScore ?: 0f) * 0.24f
                     val angleScore = 1f - (cutDeg / 66f) * 0.55f
                     val distScore = 1f - ((distCoinPocket + distSg) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
                     val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + hangerBonus + obstructionBias + trainingBoost - collisionPenalty * 0.30f)
@@ -786,7 +786,7 @@ object CarromGeometrySolver {
         }
         val obstacles = pieces.filter { it.color != CoinColor.STRIKER }
         val candidates = buildStrikerCandidates(board, obstacles, existingStriker, canRepositionStriker = false)
-        return solveClusterBreakShot(
+        val clusterBreak = solveClusterBreakShot(
             board = board,
             pieces = pieces,
             targetPieces = targetPieces,
@@ -797,7 +797,95 @@ object CarromGeometrySolver {
             screenHeight = screenHeight,
             shotMemory = shotMemory,
             isFreestyle = isFreestyle
-        ) ?: inPlaceAttempt
+        )
+        return clusterBreak
+            ?: inPlaceAttempt
+            ?: guaranteeEmergencyShot(
+                board = board,
+                pieces = pieces,
+                myCoinColor = myCoinColor,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                existingStriker = existingStriker,
+                shotMemory = shotMemory,
+                isFreestyle = isFreestyle
+            )
+    }
+
+    /**
+     * Last-resort guaranteed shot generator so the agent ALWAYS fires inside the 5-second turn clock
+     * whenever at least 1 coin and baseline striker position exist.
+     */
+    fun guaranteeEmergencyShot(
+        board: CarromBoardLayout,
+        pieces: List<CarromPiece>,
+        myCoinColor: CoinColor,
+        screenWidth: Int,
+        screenHeight: Int,
+        existingStriker: CarromPiece?,
+        shotMemory: CarromMemoryData? = null,
+        isFreestyle: Boolean = false
+    ): CarromShotSolution? {
+        if (board.pockets.size < 4) return null
+        val targetPieces = if (isFreestyle) {
+            pieces.filter { it.color != CoinColor.STRIKER }
+        } else {
+            pieces.filter { it.color == myCoinColor || it.color == CoinColor.QUEEN }
+                .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
+        }
+        val anchorCoin = targetPieces.minByOrNull { coin ->
+            board.pockets.minOf { pocket -> (pocket - coin.center).length() }
+        } ?: return null
+
+        val margin = board.strikerRadiusPx * 2.1f
+        val strikerPos = existingStriker?.center?.let {
+            Point2D(it.x.coerceIn(board.left + margin, board.right - margin), it.y)
+        } ?: Point2D(board.left + board.width * 0.5f, board.baselineY)
+
+        val nearestPocketIdx = board.pockets.indices.minByOrNull { idx ->
+            (board.pockets[idx] - anchorCoin.center).length()
+        } ?: 0
+        val nearestPocket = board.pockets[nearestPocketIdx]
+        val coinDir = (nearestPocket - anchorCoin.center).normalized()
+        val ghost = anchorCoin.center - coinDir * (board.coinRadiusPx + board.strikerRadiusPx)
+        var rawDir = (ghost - strikerPos).normalized()
+        if (rawDir.length() < 0.05f || rawDir.y > 0.35f) {
+            rawDir = (anchorCoin.center - strikerPos).normalized()
+        }
+        if (rawDir.length() < 0.05f) {
+            rawDir = Point2D(0f, -1f)
+        }
+
+        val cal = shotMemory?.boardCalibration?.takeIf { it.enabled }
+        val matchPowerGain = shotMemory?.matchCalibration?.shotPowerGain ?: 1.0f
+        val dragEnd = computeSlingshotDragEnd(
+            strikerPos = strikerPos,
+            shotDir = rawDir,
+            totalDistance = (anchorCoin.center - strikerPos).length().coerceAtLeast(board.width * 0.35f),
+            boardWidth = board.width,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            cutAngleDeg = 12f,
+            powerMultiplier = (0.94f * matchPowerGain * (cal?.maxPullScale ?: 1.0f)).coerceIn(0.75f, 1.35f),
+            deadzonePx = cal?.slingshotDeadzonePx ?: 22f,
+            curveGamma = cal?.slingshotCurveGamma ?: 1.0f
+        )
+
+        return CarromShotSolution(
+            strikerPos = strikerPos,
+            dragEnd = dragEnd,
+            ghostBall = ghost,
+            targetCoin = anchorCoin,
+            targetPocket = nearestPocket,
+            pocketIndex = nearestPocketIdx,
+            cutAngleDeg = 12f,
+            isBankShot = false,
+            isBreakShot = true,
+            isSureShot = false,
+            powerStyle = CarromPowerStyle.MEDIUM,
+            confidenceScore = 0.40f,
+            reason = "5s Guaranteed Shot -> ${anchorCoin.color.name} (${anchorCoin.center.x.toInt()},${anchorCoin.center.y.toInt()})"
+        )
     }
 
     private fun refineWithPhysicsRollout(

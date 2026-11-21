@@ -8,7 +8,7 @@ enum class TurnProbeStage(val badge: String) {
     PROBING_SLIDER("PROBING"),
     LOCKED_SURE_SHOT("SURE SHOT"),
     CAROM_SURE_SHOT("CAROM SURE"),
-    FALLBACK_FIRE("8.2s SAFE SHOT"),
+    FALLBACK_FIRE("5s MUST SHOOT"),
     WATCH_TRAINING("WATCH TRAIN")
 }
 
@@ -30,9 +30,9 @@ data class CarromAimVisualData(
 data class CarromTurnHudState(
     val isActive: Boolean = false,
     val elapsedSec: Float = 0f,
-    val maxSec: Float = 9.0f,
+    val maxSec: Float = 5.0f,
     val probeNumber: Int = 0,
-    val maxProbes: Int = 4,
+    val maxProbes: Int = 2,
     val scanCount: Int = 0,
     val rejectedCount: Int = 0,
     val stage: TurnProbeStage = TurnProbeStage.PRE_SCAN,
@@ -46,22 +46,21 @@ data class CarromTurnHudState(
 )
 
 /**
- * Per-Turn Working Memory, Ranked 4-Spot Side-to-Side Striker Probe Queue & 9-Second Turn Shot Clock.
+ * Per-Turn Working Memory, Ranked 2-Spot Fast Baseline Probe Queue & Strict 5-Second Shot Clock.
  *
- * 1. Scans the whole board before moving and stabilizes piece coordinates across frames.
- * 2. Holds up to 4 physics + training-ranked baseline X candidate positions spread side-to-side.
- * 3. Rejects colliding/foul spots and slides across the baseline (3-4 moves) until a zero-foul Sure Shot locks.
- * 4. Accepts collision-assisted shots that STILL cleanly sink our coin/Queen without striker scratch as Sure Shots.
- * 5. Enforces an 8.2s fallback deadline so the safest zero-foul shot fires within 8-9 seconds.
+ * 1. Scans the board & stabilizes piece coordinates across frames.
+ * 2. Holds up to 2 physics + training-ranked baseline X candidate positions.
+ * 3. Fuses Training Data (Watch & Play) with Physics Rollout to lock Sure Shots fast.
+ * 4. Enforces a strict 3.85s probe cutoff / 5.0s hard deadline so a foul-safe shot ALWAYS fires within 5s.
  */
 class CarromTurnMemory {
 
     companion object {
-        const val MAX_TURN_BUDGET_MS = 9_000L
-        const val FALLBACK_FIRE_ELAPSED_MS = 8_200L
-        const val MAX_BASELINE_PROBES = 4
-        private const val LIVE_FIRE_RESERVE_MS = 850L
-        private const val A11Y_FIRE_RESERVE_MS = 1_500L
+        const val MAX_TURN_BUDGET_MS = 5_000L
+        const val FALLBACK_FIRE_ELAPSED_MS = 3_850L
+        const val MAX_BASELINE_PROBES = 2
+        private const val LIVE_FIRE_RESERVE_MS = 950L
+        private const val A11Y_FIRE_RESERVE_MS = 1_250L
         private const val MAX_STORED_SCANS = 20
         private const val SPOT_MATCH_TOLERANCE_PX = 28f
     }
@@ -110,8 +109,8 @@ class CarromTurnMemory {
     }
 
     /**
-     * True when fewer than 6 slider moves have been dispatched AND there is enough room inside
-     * the 7.0s turn window to slide, verify the next frame, and still fire before the 6.35s cutoff.
+     * True when fewer than 2 slider moves have been dispatched AND there is enough room inside
+     * the 5.0s turn window to slide, verify the next frame, and still fire before the 3.85s cutoff.
      */
     fun canAffordAnotherSliderMove(
         nowMs: Long = System.currentTimeMillis(),
@@ -326,8 +325,8 @@ class CarromTurnMemory {
     }
 
     /**
-     * Deadline fallback (when all <=7 probes fail or clock hits ~8.35s):
-     * combines all accumulated Turn Memory frames and fires the safest foul-free pot or cluster break.
+     * Deadline fallback (when <=2 probes finish or 5s clock hits ~3.85s):
+     * combines all accumulated Turn Memory frames, Training Data, and Physics Engine to MUST-FIRE a shot.
      */
     fun solveCombinedFinalShot(
         board: CarromBoardLayout,
@@ -338,29 +337,49 @@ class CarromTurnMemory {
         screenHeight: Int,
         shotMemory: CarromMemoryData?,
         usePhysicsRollout: Boolean,
-        fallbackSolution: CarromShotSolution,
+        fallbackSolution: CarromShotSolution?,
         isFreestyle: Boolean = false,
         queenPendingCover: Boolean = false
-    ): CarromShotSolution {
+    ): CarromShotSolution? {
         val consensusPieces = buildConsensusPieces(latestPieces, board.coinRadiusPx)
-        val combinedPieces = if (striker != null) consensusPieces + striker else consensusPieces
+        val anchorStriker = striker ?: run {
+            val lastX = scanFrames.lastOrNull { it.strikerX != null }?.strikerX
+                ?: fallbackSolution?.strikerPos?.x
+                ?: (board.left + board.width * 0.5f)
+            CarromPiece(CoinColor.STRIKER, Point2D(lastX, board.baselineY), board.strikerRadiusPx)
+        }
+        val combinedPieces = consensusPieces + anchorStriker
 
-        return if (striker != null) {
-            CarromGeometrySolver.solveSafestBreakOrPotShot(
+        val solved = CarromGeometrySolver.solveSafestBreakOrPotShot(
+            board = board,
+            pieces = combinedPieces,
+            myCoinColor = myCoinColor,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            existingStriker = anchorStriker,
+            shotMemory = shotMemory,
+            usePhysicsRollout = usePhysicsRollout,
+            isFreestyle = isFreestyle,
+            queenPendingCover = queenPendingCover
+        )
+        if (solved != null) return solved
+
+        val bestRemembered = bestEvaluatedThisTurn?.takeIf {
+            !it.rejectedDueToCollisionOrFoul &&
+                abs(it.strikerPos.x - anchorStriker.center.x) <= board.strikerRadiusPx * 1.6f
+        }
+        return bestRemembered
+            ?: fallbackSolution
+            ?: CarromGeometrySolver.guaranteeEmergencyShot(
                 board = board,
                 pieces = combinedPieces,
                 myCoinColor = myCoinColor,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                existingStriker = striker,
+                existingStriker = anchorStriker,
                 shotMemory = shotMemory,
-                usePhysicsRollout = usePhysicsRollout,
-                isFreestyle = isFreestyle,
-                queenPendingCover = queenPendingCover
-            ) ?: fallbackSolution
-        } else {
-            fallbackSolution
-        }
+                isFreestyle = isFreestyle
+            )
     }
 
     fun buildHudState(
@@ -421,12 +440,12 @@ class CarromTurnMemory {
             sol.isTrainingMatched && sol.isSureShot -> "TRAIN-SURE"
             sol.isCollisionAssistedSureShot -> "CAROM-SURE"
             sol.isSureShot -> "SURE"
-            sol.isBreakShot -> "BREAK-8.2s"
-            else -> "BEST-8.2s"
+            sol.isBreakShot -> "BREAK-5s"
+            else -> "MUST-5s"
         }
         return String.format(
             java.util.Locale.US,
-            "[9s Clock %.1fs/9.0s | Probe %d/%d (%d rej) | %s]",
+            "[5s Clock %.1fs/5.0s | Probe %d/%d (%d rej) | %s]",
             sec,
             (_sliderMovesThisTurn + 1).coerceAtMost(MAX_BASELINE_PROBES),
             totalPlannedProbes.coerceAtLeast(1).coerceAtMost(MAX_BASELINE_PROBES),

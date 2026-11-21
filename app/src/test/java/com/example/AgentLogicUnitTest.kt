@@ -1453,19 +1453,19 @@ class AgentLogicUnitTest {
     }
 
     @Test
-    fun `turn memory enforces 9s clock allows up to 4 side-to-side slides in budget and fuses multi-frame scans`() {
+    fun `turn memory enforces 5s clock allows up to 2 side-to-side slides in budget and fuses multi-frame scans`() {
         val tm = com.example.game.CarromTurnMemory()
         val t0 = 10_000L
 
-        assertEquals(9_000L, com.example.game.CarromTurnMemory.MAX_TURN_BUDGET_MS)
-        assertEquals(8_200L, com.example.game.CarromTurnMemory.FALLBACK_FIRE_ELAPSED_MS)
-        assertEquals(4, com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES)
+        assertEquals(5_000L, com.example.game.CarromTurnMemory.MAX_TURN_BUDGET_MS)
+        assertEquals(3_850L, com.example.game.CarromTurnMemory.FALLBACK_FIRE_ELAPSED_MS)
+        assertEquals(2, com.example.game.CarromTurnMemory.MAX_BASELINE_PROBES)
 
         val coin1Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(300f, 700f), 28f)
         val coin2Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, com.example.game.Point2D(600f, 800f), 28f)
         val striker1 = com.example.game.CarromPiece(com.example.game.CoinColor.STRIKER, com.example.game.Point2D(540f, 1320f), 35f)
 
-        // Frame 1 (pre-slide): can slide while under 4 moves and within 9s budget
+        // Frame 1 (pre-slide): can slide while under 2 moves and within 5s budget
         tm.recordObservation(t0, listOf(coin1Frame1, coin2Frame1), striker1, com.example.game.Point2D(540f, 1600f), null, null)
         assertTrue(tm.canAffordAnotherSliderMove(t0 + 1_000L, isLiveStreamActive = true))
         tm.recordSliderMoveDispatched(540f)
@@ -1474,25 +1474,22 @@ class AgentLogicUnitTest {
         val coin1Frame2 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(304f, 698f), 28f)
         tm.recordObservation(t0 + 1_200L, listOf(coin1Frame2, coin2Frame1), striker1.copy(center = com.example.game.Point2D(250f, 1320f)), com.example.game.Point2D(250f, 1600f), null, 0.92f)
         assertTrue(tm.canAffordAnotherSliderMove(t0 + 3_500L, isLiveStreamActive = true))
-        tm.recordSliderMoveDispatched(250f)
+
+        // Cut off at 3.9s (live) and 3.8s (non-live reserve 1.25s) to guarantee firing within 5.0s
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 3_900L, isLiveStreamActive = true))
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 3_800L, isLiveStreamActive = false))
 
         // Frame 3: coin2 temporarily missed by glare -> consensus fusion still preserves coin2 AND averages coin1
-        tm.recordObservation(t0 + 4_000L, listOf(coin1Frame1), striker1.copy(center = com.example.game.Point2D(810f, 1320f)), com.example.game.Point2D(810f, 1600f), null, 0.94f)
+        tm.recordObservation(t0 + 2_000L, listOf(coin1Frame1), striker1.copy(center = com.example.game.Point2D(810f, 1320f)), com.example.game.Point2D(810f, 1600f), null, 0.94f)
         val fused = tm.buildConsensusPieces(listOf(coin1Frame1), coinRadiusPx = 28f)
         assertEquals(2, fused.size)
         val fusedWhite = fused.first { it.color == com.example.game.CoinColor.WHITE }
         assertTrue("Expected stabilized X between 300 and 304, got ${fusedWhite.center.x}", fusedWhite.center.x in 300.1f..303.5f)
 
-        // Still within 9s live-stream reserve at 7.6s, but cut off at 8.3s (live) and 7.7s (non-live)
-        assertTrue(tm.canAffordAnotherSliderMove(t0 + 7_600L, isLiveStreamActive = true))
-        assertFalse(tm.canAffordAnotherSliderMove(t0 + 8_300L, isLiveStreamActive = true))
-        assertFalse(tm.canAffordAnotherSliderMove(t0 + 7_700L, isLiveStreamActive = false))
-
-        // Hard 4-move cap blocks a 5th slide even early in the turn
-        tm.recordSliderMoveDispatched(810f)
-        tm.recordSliderMoveDispatched(380f)
-        assertEquals(4, tm.sliderMovesThisTurn)
-        assertFalse(tm.canAffordAnotherSliderMove(t0 + 4_500L, isLiveStreamActive = true))
+        // Hard 2-move cap blocks a 3rd slide even early in the turn
+        tm.recordSliderMoveDispatched(250f)
+        assertEquals(2, tm.sliderMovesThisTurn)
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 2_500L, isLiveStreamActive = true))
 
         tm.resetTurn()
         assertFalse(tm.isTurnActive)

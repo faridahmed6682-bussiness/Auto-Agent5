@@ -350,10 +350,12 @@ object CarromPhysicsSimulator {
                 chosenOutcome.kissedObstacleCount > 0
 
             // Strict zero-foul rule: never lock a Sure Shot if the chosen trajectory OR any +-1.2 deg jitter neighbor scratches!
+            // When Training Data (Watch or past real-game patterns) matches strongly, lock Sure Shot at >=0.40 robustness.
+            val requiredRobustness = if (candidate.trainingMatchScore >= 0.52f) 0.40f else 0.55f
             val isSureShot = anyCleanTargetPot &&
                 !chosenOutcome.strikerScratched &&
                 !anyNeighborScratched &&
-                robustness >= 0.55f
+                robustness >= requiredRobustness
             val isCollisionAssisted = isSureShot && hasSecondaryCollision
             val rejectedByCollisionOrFoul = chosenOutcome.strikerScratched ||
                 anyNeighborScratched ||
@@ -361,11 +363,11 @@ object CarromPhysicsSimulator {
                 (!candidate.isBreakShot && hasSecondaryCollision && !anyCleanTargetPot)
 
             val compositeScore = (
-                bestLocalScore * 0.48f +
-                    candidate.staticScore * 0.20f +
-                    robustness * 0.18f +
+                bestLocalScore * 0.44f +
+                    candidate.staticScore * 0.18f +
+                    robustness * 0.16f +
                     (if (isSureShot) 0.10f else 0f) +
-                    candidate.trainingMatchScore * 0.12f -
+                    candidate.trainingMatchScore * 0.22f -
                     (if (isCollisionAssisted) 0.03f else 0f) -
                     candidate.collisionRiskPenalty * 0.22f -
                     heatmapRisk * 0.20f

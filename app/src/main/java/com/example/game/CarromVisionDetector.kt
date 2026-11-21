@@ -63,7 +63,8 @@ object CarromVisionDetector {
         isFreestyle: Boolean = false,
         queenPendingCover: Boolean = false,
         isLiveStream: Boolean = false,
-        calibrationOverride: BoardCalibrationProfile? = null
+        calibrationOverride: BoardCalibrationProfile? = null,
+        isTurnActive: Boolean = false
     ): CarromVisionOutcome {
         if (screenshot == null || screenshot.width < 120 || screenshot.height < 120) {
             return CarromVisionOutcome.NeedsAiVision("No screenshot available for Carrom solver.")
@@ -94,8 +95,8 @@ object CarromVisionDetector {
         previousBoardLuma = currentLuma
 
         val effectiveMotionThreshold = if (allowStrikerRepositioning) MOTION_THRESHOLD else MOTION_THRESHOLD * 1.55f
-        val maxMotionWaits = if (isLiveStream) 18 else 6
-        if (prevLuma != null && consecutiveOfflineWaits < maxMotionWaits) {
+        val maxMotionWaits = if (isLiveStream) 4 else 2
+        if (!isTurnActive && prevLuma != null && consecutiveOfflineWaits < maxMotionWaits) {
             val meanDiff = computeMeanAbsDiff(prevLuma, currentLuma)
             if (meanDiff > effectiveMotionThreshold) {
                 return CarromVisionOutcome.WaitStillnessOrTurn(
@@ -262,7 +263,12 @@ object CarromVisionDetector {
             }
         }
 
-        val calibratedBaselineY = strikerPiece?.center?.y ?: defaultBaselineY
+        val effectiveStriker = strikerPiece ?: sliderKnobPx?.let { knob ->
+            val margin = strikerRadius * 2.1f
+            val mappedX = knob.x.coerceIn(boardLeft + margin, boardRight - margin)
+            CarromPiece(CoinColor.STRIKER, Point2D(mappedX, defaultBaselineY), strikerRadius)
+        }
+        val calibratedBaselineY = effectiveStriker?.center?.y ?: defaultBaselineY
         val boardLayout = CarromBoardLayout(
             left = boardLeft,
             top = boardTop,
@@ -281,7 +287,7 @@ object CarromVisionDetector {
             myCoinColor = myCoinColor,
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            existingStriker = strikerPiece,
+            existingStriker = effectiveStriker,
             canRepositionStriker = allowStrikerRepositioning,
             shotMemory = shotMemory,
             usePhysicsRollout = usePhysicsRollout,
@@ -289,17 +295,17 @@ object CarromVisionDetector {
             queenPendingCover = queenPendingCover
         )
 
-        val finalSolution = if (solution != null && solution.confidenceScore >= 0.50f) {
+        val finalSolution = if (solution != null && solution.confidenceScore >= 0.45f) {
             solution
-        } else if (strikerPiece != null && promoted.count { it.color != CoinColor.STRIKER } >= 1) {
-            // Own striker is confirmed on bottom baseline: always fall back to safest foul-free shot/break rather than stalling
+        } else if (effectiveStriker != null && promoted.count { it.color != CoinColor.STRIKER } >= 1) {
+            // Own striker or slider is confirmed on bottom baseline: ALWAYS solve safest/emergency shot within 5s rather than stalling
             CarromGeometrySolver.solveSafestBreakOrPotShot(
                 board = boardLayout,
                 pieces = promoted,
                 myCoinColor = myCoinColor,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                existingStriker = strikerPiece,
+                existingStriker = effectiveStriker,
                 shotMemory = shotMemory,
                 usePhysicsRollout = usePhysicsRollout,
                 isFreestyle = isFreestyle,
@@ -309,10 +315,11 @@ object CarromVisionDetector {
             solution
         }
 
-        return if (finalSolution != null && finalSolution.confidenceScore >= 0.50f) {
+        val minAcceptConf = if (effectiveStriker != null) 0.15f else 0.48f
+        return if (finalSolution != null && finalSolution.confidenceScore >= minAcceptConf) {
             CarromVisionOutcome.SolvedShot(
                 solution = finalSolution,
-                detectedStriker = strikerPiece,
+                detectedStriker = effectiveStriker,
                 board = boardLayout,
                 detectedSliderKnob = sliderKnobPx,
                 boardPieces = promoted
@@ -324,7 +331,7 @@ object CarromVisionDetector {
                 promoted.count { it.color == myCoinColor || it.color == CoinColor.QUEEN }
             }
             CarromVisionOutcome.NeedsAiVision(
-                diagnostic = "No offline shot (targets=$myTargetsCount, total=${promoted.size}, striker=${strikerPiece != null}); using AI Vision.",
+                diagnostic = "No offline shot (targets=$myTargetsCount, total=${promoted.size}, striker=${effectiveStriker != null}); using AI Vision.",
                 boardPieces = promoted
             )
         }
