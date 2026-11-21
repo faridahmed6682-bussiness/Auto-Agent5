@@ -87,6 +87,7 @@ function getUserTools(userId) {
 const keyCooldownUntil = new Map();
 const modelCooldownUntil = new Map();
 let openRouterRotationOffset = 0;
+let groqRotationOffset = 0;
 
 function parseApiKeyList(...rawValues) {
     const unique = new Set();
@@ -164,7 +165,76 @@ async function callOpenRouterWithKey(apiKey, model, systemInstruction, userPromp
     return { ok: Boolean(content), status: resp.status, content };
 }
 
+async function callGroqWithKey(apiKey, model, systemInstruction, userPrompt, history = []) {
+    const safeHistory = Array.isArray(history)
+        ? history
+              .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
+              .slice(-12)
+              .map((m) => ({ role: m.role, content: String(m.content).slice(0, 800) }))
+        : [];
+
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'X-Title': 'TapPilot Agent'
+        },
+        body: JSON.stringify({
+            model,
+            messages: [
+                { role: 'system', content: systemInstruction },
+                ...safeHistory,
+                { role: 'user', content: userPrompt }
+            ],
+            max_tokens: 600,
+            temperature: 0.65,
+            reasoning_effort: 'low'
+        })
+    });
+    if (!resp.ok) {
+        return { ok: false, status: resp.status, content: null };
+    }
+    const data = await resp.json();
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const content = cleanModelReply(rawContent);
+    return { ok: Boolean(content), status: resp.status, content };
+}
+
 async function callLLM(systemInstruction, userPrompt, history = []) {
+    // Groq Cloud first (fast, free tier) — same keys as the Munsi Store bot.
+    const groqKeys = parseApiKeyList(
+        process.env.GROQ_API_KEYS,
+        process.env.GROQ_API_KEY
+    );
+    if (groqKeys.length > 0) {
+        const groqModel = (process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim();
+        const candidateKeys = getAvailableKeys(groqKeys, groqRotationOffset);
+        groqRotationOffset = (groqRotationOffset + 1) % groqKeys.length;
+
+        for (const apiKey of candidateKeys) {
+            try {
+                const result = await callGroqWithKey(
+                    apiKey,
+                    groqModel,
+                    systemInstruction,
+                    userPrompt,
+                    history
+                );
+                if (result.ok && result.content) {
+                    keyCooldownUntil.delete(apiKey);
+                    return result.content;
+                }
+                if (result.status === 401 || result.status === 402 || result.status === 403 || result.status === 429) {
+                    markKeyCooldown(apiKey, result.status);
+                }
+            } catch (err) {
+                console.error(`[Groq Failover][${groqModel}]`, err.message);
+                markKeyCooldown(apiKey, 500);
+            }
+        }
+    }
+
     const openRouterKeys = parseApiKeyList(
         process.env.OPENROUTER_API_KEYS,
         process.env.OPENROUTER_API_KEY
@@ -398,7 +468,7 @@ async function runUnifiedAssistant({
         reply:
             channel === 'whatsapp'
                 ? 'এইতো ব্যস্ত ছিলাম একটু, একটু পর মেসেজ দিচ্ছি।'
-                : `সক্রিয় টুলগুলো (${tools.map((t) => t.label).join(', ') || 'কোনোটি কানেক্ট নেই'}): লাইভ AI রিপ্লাইয়ের জন্য সার্ভারে GEMINI_API_KEY বা OPENROUTER_API_KEY সেট করুন।`,
+                : `সক্রিয় টুলগুলো (${tools.map((t) => t.label).join(', ') || 'কোনোটি কানেক্ট নেই'}): লাইভ AI রিপ্লাইয়ের জন্য সার্ভারে GROQ_API_KEY, GEMINI_API_KEY বা OPENROUTER_API_KEY সেট করুন।`,
         toolsUsed,
         contextSummary: gatheredContext
     };
