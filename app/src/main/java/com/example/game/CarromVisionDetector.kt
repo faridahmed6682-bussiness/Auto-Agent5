@@ -220,14 +220,23 @@ object CarromVisionDetector {
             sliderKnobPx = sliderKnobPx
         )
 
-        if (promoted.size < 2) {
+        if (promoted.isEmpty()) {
             return CarromVisionOutcome.NeedsAiVision(
-                diagnostic = "Detected ${promoted.size} Carrom piece(s) (slider=${sliderKnobPx != null}); delegating to AI Vision.",
+                diagnostic = "Detected 0 Carrom pieces (slider=${sliderKnobPx != null}); delegating to AI Vision.",
                 boardPieces = promoted
             )
         }
 
         val strikerPiece = promoted.firstOrNull { it.color == CoinColor.STRIKER }
+        // Fallback striker: when our striker/slider cannot be seen on the bottom
+        // baseline but no opponent striker is visible on the top baseline either,
+        // the "whose turn is it" signal itself is unreliable. The old code waited
+        // out the budget and then returned NeedsAiVision here, which the
+        // coordinator turns into an endless WAIT whenever no AI-Vision key is
+        // configured — so the striker sat completely still forever and the auto
+        // turn never started. After the wait budget, assume it IS our turn and
+        // play from the baseline centre instead of sitting still.
+        var fallbackStriker: CarromPiece? = null
         if (strikerPiece == null && sliderKnobPx == null) {
             val detectedTopStriker = detectTopStrikerOnBaseline(
                 bitmap = screenshot,
@@ -245,18 +254,31 @@ object CarromVisionDetector {
             } else {
                 if (isLiveStream) 9 else 3
             }
-            return if (consecutiveOfflineWaits < maxTurnWaitCycles) {
+            if (consecutiveOfflineWaits < maxTurnWaitCycles) {
                 val reason = if (detectedTopStriker != null) {
                     "Opponent striker confirmed on top baseline — waiting offline for our turn (0 API)."
                 } else {
                     "Striker/slider not on bottom baseline (likely opponent turn) — waiting offline (0 API)."
                 }
-                CarromVisionOutcome.WaitStillnessOrTurn(
+                return CarromVisionOutcome.WaitStillnessOrTurn(
                     reason = reason,
                     boardPieces = promoted
                 )
+            }
+            val hasTargetCoin = promoted.any {
+                it.color != CoinColor.STRIKER &&
+                    (isFreestyle || it.color == myCoinColor || it.color == CoinColor.QUEEN)
+            }
+            if (detectedTopStriker == null && hasTargetCoin) {
+                // No opponent striker seen and a pottable coin is visible: synthesize
+                // our striker at the baseline centre so the solver can take a shot.
+                fallbackStriker = CarromPiece(
+                    CoinColor.STRIKER,
+                    Point2D((boardLeft + boardRight) / 2f, defaultBaselineY),
+                    strikerRadius
+                )
             } else {
-                CarromVisionOutcome.NeedsAiVision(
+                return CarromVisionOutcome.NeedsAiVision(
                     diagnostic = "Striker not matched locally (${promoted.size} coins visible, no slider knob); delegating shot to AI Vision.",
                     boardPieces = promoted
                 )
@@ -267,7 +289,7 @@ object CarromVisionDetector {
             val margin = strikerRadius * 2.1f
             val mappedX = knob.x.coerceIn(boardLeft + margin, boardRight - margin)
             CarromPiece(CoinColor.STRIKER, Point2D(mappedX, defaultBaselineY), strikerRadius)
-        }
+        } ?: fallbackStriker
         val calibratedBaselineY = effectiveStriker?.center?.y ?: defaultBaselineY
         val boardLayout = CarromBoardLayout(
             left = boardLeft,
