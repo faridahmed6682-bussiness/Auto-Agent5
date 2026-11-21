@@ -68,6 +68,9 @@ data class BoardCalibrationProfile(
     val coinRadiusRatio: Float = 0.029f,
     val strikerRadiusRatio: Float = 0.036f,
     val maxPullScale: Float = 1.0f,
+    val slingshotDeadzonePx: Float = 22f,
+    val slingshotCurveGamma: Float = 1.0f,
+    val cutThrowBias: Float = 1.0f,
     val whiteColor: CalibratedHsvColor? = null,
     val blackColor: CalibratedHsvColor? = null,
     val queenColor: CalibratedHsvColor? = null,
@@ -143,6 +146,9 @@ data class BoardCalibrationProfile(
             .put("coinRadiusRatio", coinRadiusRatio.toDouble())
             .put("strikerRadiusRatio", strikerRadiusRatio.toDouble())
             .put("maxPullScale", maxPullScale.toDouble())
+            .put("slingshotDeadzonePx", slingshotDeadzonePx.toDouble())
+            .put("slingshotCurveGamma", slingshotCurveGamma.toDouble())
+            .put("cutThrowBias", cutThrowBias.toDouble())
             .apply {
                 whiteColor?.let { put("whiteColor", it.toJson()) }
                 blackColor?.let { put("blackColor", it.toJson()) }
@@ -186,6 +192,9 @@ data class BoardCalibrationProfile(
                 coinRadiusRatio = obj.optDouble("coinRadiusRatio", 0.029).toFloat().coerceIn(0.018f, 0.048f),
                 strikerRadiusRatio = obj.optDouble("strikerRadiusRatio", 0.036).toFloat().coerceIn(0.024f, 0.058f),
                 maxPullScale = obj.optDouble("maxPullScale", 1.0).toFloat().coerceIn(0.65f, 1.45f),
+                slingshotDeadzonePx = obj.optDouble("slingshotDeadzonePx", 22.0).toFloat().coerceIn(0f, 60f),
+                slingshotCurveGamma = obj.optDouble("slingshotCurveGamma", 1.0).toFloat().coerceIn(0.75f, 1.35f),
+                cutThrowBias = obj.optDouble("cutThrowBias", 1.0).toFloat().coerceIn(0f, 2.0f),
                 whiteColor = CalibratedHsvColor.fromJson(obj.optJSONObject("whiteColor")),
                 blackColor = CalibratedHsvColor.fromJson(obj.optJSONObject("blackColor")),
                 queenColor = CalibratedHsvColor.fromJson(obj.optJSONObject("queenColor")),

@@ -1767,5 +1767,64 @@ class ExampleRobolectricTest {
         org.junit.Assert.assertNotNull(solved.detectedSliderKnob)
         bm.recycle()
     }
+
+    @Test
+    fun `carrom cut throw compensation and slingshot curve parameters persist and adjust aim vector`() {
+        val shotDir = com.example.game.Point2D(0.35f, -0.936f).normalized()
+        val coinDir = com.example.game.Point2D(0f, -1f)
+        val compensated = com.example.game.CarromGeometrySolver.applyCutThrowCompensation(
+            shotDir = shotDir,
+            coinDir = coinDir,
+            cutAngleDeg = 32f,
+            throwBias = 1.2f
+        )
+        // Compensated direction should rotate slightly fuller toward coinDir (smaller |x|)
+        org.junit.Assert.assertTrue(kotlin.math.abs(compensated.x) < kotlin.math.abs(shotDir.x))
+
+        val cal = com.example.game.BoardCalibrationProfile(
+            enabled = true,
+            slingshotDeadzonePx = 32f,
+            slingshotCurveGamma = 1.15f,
+            cutThrowBias = 1.25f
+        )
+        val decoded = com.example.game.BoardCalibrationProfile.fromJson(cal.toJson())
+        assertEquals(32f, decoded.slingshotDeadzonePx, 0.01f)
+        assertEquals(1.15f, decoded.slingshotCurveGamma, 0.01f)
+        assertEquals(1.25f, decoded.cutThrowBias, 0.01f)
+    }
+
+    @Test
+    fun `facebook automation validates links and ids, matches rules, and round-trips config json`() {
+        org.junit.Assert.assertTrue(com.example.facebook.FacebookAutomationRepository.isValidGraphId("1029384756_998877"))
+        org.junit.Assert.assertFalse(com.example.facebook.FacebookAutomationRepository.isValidGraphId("12345/../me"))
+        org.junit.Assert.assertTrue(com.example.facebook.FacebookAutomationRepository.isValidPublicPostUrl("https://example.com/shop"))
+        org.junit.Assert.assertFalse(com.example.facebook.FacebookAutomationRepository.isValidPublicPostUrl("javascript:alert(1)"))
+        org.junit.Assert.assertFalse(com.example.facebook.FacebookAutomationRepository.isValidPublicPostUrl("http://127.0.0.1/admin"))
+
+        val rules = listOf(
+            com.example.facebook.FacebookAutoReplyRule("r1", "দাম, price", "দাম ৪৫০ টাকা", true),
+            com.example.facebook.FacebookAutoReplyRule("r2", "*", "ধন্যবাদ!", true)
+        )
+        val matchedBn = com.example.facebook.FacebookAutomationRepository.matchAutoReplyRule("ভাই এটার দাম কত?", rules)
+        assertEquals("r1", matchedBn?.id)
+        val matchedFallback = com.example.facebook.FacebookAutomationRepository.matchAutoReplyRule("সুন্দর পোস্ট", rules)
+        assertEquals("r2", matchedFallback?.id)
+
+        val cfg = com.example.facebook.FacebookAutomationConfig(
+            connectedAccountName = "Demo Page",
+            selectedPageId = "123456789",
+            selectedPageName = "Demo Shop",
+            autoResponderEnabled = true,
+            pollIntervalSec = 30,
+            rules = rules,
+            repliedCommentIds = setOf("c_1", "c_2")
+        )
+        val restored = com.example.facebook.FacebookAutomationConfig.fromJson(cfg.toJson().toString())
+        assertEquals("123456789", restored.selectedPageId)
+        assertEquals(30, restored.pollIntervalSec)
+        assertEquals(2, restored.repliedCommentIds.size)
+        org.junit.Assert.assertTrue(restored.autoResponderEnabled)
+    }
 }
+
 

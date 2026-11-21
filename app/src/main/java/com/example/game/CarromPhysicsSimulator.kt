@@ -196,7 +196,56 @@ object CarromPhysicsSimulator {
                 }
             }
 
-            val chosenOutcome = bestOutcome ?: continue
+            var chosenOutcome = bestOutcome ?: continue
+            // Stage 2: Coarse-to-Fine micro-sweep (+-0.22 / +-0.45 deg) to lock pocket-jaw center
+            if (!candidate.isBreakShot) {
+                val fineAngles = floatArrayOf(-0.45f, -0.22f, 0f, 0.22f, 0.45f)
+                val finePowers = floatArrayOf(0.96f, 1.0f, 1.04f)
+                val centerAngle = bestAngleDeg
+                val centerPower = bestPowerFactor
+                for (fp in finePowers) {
+                    val pFactor = (centerPower * fp).coerceIn(0.75f, 1.32f)
+                    for (fa in fineAngles) {
+                        if (fa == 0f && fp == 1.0f) continue
+                        val testAngle = centerAngle + fa
+                        val dir = rotateVector(candidate.baseDir, testAngle)
+                        val speed = computeInitialSpeedPx(
+                            board = board,
+                            cutAngleDeg = candidate.cutAngleDeg,
+                            totalDistance = candidate.totalDistance,
+                            pullMultiplier = candidate.basePullMultiplier * pFactor * shotPowerGain,
+                            frictionScale = frictionScale
+                        )
+                        val fineOutcome = runSingleRollout(
+                            board = board,
+                            pieces = pieces,
+                            strikerPos = candidate.strikerPos,
+                            shotDir = dir,
+                            initialSpeed = speed,
+                            targetCoin = candidate.targetCoin,
+                            myCoinColor = myCoinColor,
+                            frictionScale = frictionScale,
+                            jawSafetyBuffer = jawSafetyBuffer,
+                            extraScratchGuard = extraScratchGuard,
+                            isFreestyle = isFreestyle
+                        )
+                        totalRollouts++
+                        outcomesByKey[pFactor to testAngle] = fineOutcome
+                        val fineScore = scoreOutcome(
+                            candidate = candidate,
+                            outcome = fineOutcome,
+                            angleOffsetDeg = testAngle,
+                            shotMemory = shotMemory
+                        )
+                        if (fineScore > bestLocalScore) {
+                            bestLocalScore = fineScore
+                            bestAngleDeg = testAngle
+                            bestPowerFactor = pFactor
+                            chosenOutcome = fineOutcome
+                        }
+                    }
+                }
+            }
             // Measure robustness around bestAngleDeg at bestPowerFactor (+-0.6 / +-1.2 deg swipe jitter)
             val neighborOffsets = if (candidate.isBreakShot) {
                 floatArrayOf(-2.0f, 0f, 2.0f)

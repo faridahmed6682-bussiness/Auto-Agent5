@@ -801,6 +801,123 @@ fun BackgroundAutoReplyQuickCard(
 }
 
 @Composable
+fun FacebookAutomationQuickCard(
+    fbConfig: com.example.facebook.FacebookAutomationConfig,
+    onOpenFacebookHub: () -> Unit,
+    onToggleAutoResponder: (Boolean) -> Unit
+) {
+    val activeBorderColor by animateColorAsState(
+        targetValue = if (fbConfig.autoResponderEnabled) CyberTeal else SlateBorder,
+        animationSpec = tween(260),
+        label = "fbAutomationCardBorder"
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (fbConfig.autoResponderEnabled) CyberTealDark.copy(alpha = 0.35f) else SlateSurface
+        ),
+        border = BorderStroke(1.dp, activeBorderColor),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        tint = if (fbConfig.isConnected) CyberTeal else ElectricCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.fb_hub_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                if (fbConfig.isConnected) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(CyberTealDark)
+                            .border(1.dp, CyberTeal, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (fbConfig.autoResponderEnabled) "AUTO-REPLY ON" else "CONNECTED",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyberTeal,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = if (fbConfig.isConnected) {
+                    "Page: ${fbConfig.selectedPageName} • ${fbConfig.rules.count { it.enabled }} active auto-reply rule(s) • ${fbConfig.logs.size} log(s)"
+                } else {
+                    stringResource(R.string.fb_hub_desc)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (fbConfig.isConnected) ElectricCyan else TextSecondary
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onOpenFacebookHub,
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .height(48.dp)
+                        .testTag("btn_open_fb_hub"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyberTealDark,
+                        contentColor = CyberTeal
+                    ),
+                    border = BorderStroke(1.dp, CyberTeal.copy(alpha = 0.65f))
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = stringResource(R.string.action_open_fb_hub),
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (fbConfig.isConnected) {
+                    Switch(
+                        checked = fbConfig.autoResponderEnabled,
+                        onCheckedChange = onToggleAutoResponder,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                            checkedTrackColor = CyberTeal
+                        ),
+                        modifier = Modifier.testTag("switch_fb_quick_auto")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun CarromWatchTrainCard(
     isServiceActive: Boolean,
     isRunningThisMode: Boolean,

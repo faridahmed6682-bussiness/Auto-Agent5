@@ -34,6 +34,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         AgentCoordinator.initialize(application.applicationContext)
+        com.example.facebook.FacebookAutomationManager.initialize(application.applicationContext)
     }
 
     val agentState: StateFlow<AgentUiState> = AgentCoordinator.uiState
@@ -45,6 +46,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val playbooks: StateFlow<List<TaskPlaybook>> = AgentCoordinator.playbooks
     val cachedActions: StateFlow<List<CachedActionEntry>> = AgentCoordinator.cachedActions
     val contacts: StateFlow<List<ContactProfile>> = AgentCoordinator.contacts
+    val fbConfig: StateFlow<com.example.facebook.FacebookAutomationConfig> = com.example.facebook.FacebookAutomationManager.config
+    val fbPosts: StateFlow<List<com.example.facebook.FacebookPostSummary>> = com.example.facebook.FacebookAutomationManager.posts
+    val fbIsBusy: StateFlow<Boolean> = com.example.facebook.FacebookAutomationManager.isBusy
+    val fbStatusMessage: StateFlow<String?> = com.example.facebook.FacebookAutomationManager.statusMessage
 
     private val _goalText = MutableStateFlow("")
     val goalText: StateFlow<String> = _goalText.asStateFlow()
@@ -246,5 +251,27 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             "Board Calibration reset to Auto Geometry."
         }
+    }
+
+    fun fbConnectToken(token: String) = com.example.facebook.FacebookAutomationManager.connectWithToken(token)
+    fun fbDisconnect() = com.example.facebook.FacebookAutomationManager.disconnectAndClearToken()
+    fun fbSelectPage(page: com.example.facebook.FacebookPageSummary) = com.example.facebook.FacebookAutomationManager.selectPage(page)
+    fun fbPublishOrSchedulePost(msg: String, link: String, mins: Int?) = com.example.facebook.FacebookAutomationManager.publishOrSchedulePost(msg, link, mins)
+    fun fbRefreshPosts() = com.example.facebook.FacebookAutomationManager.refreshPostsAndComments(silent = false)
+    fun fbRunAutoReplyOnce() = com.example.facebook.FacebookAutomationManager.runAutoReplyScanOnce()
+    fun fbToggleAutoResponder(enabled: Boolean) = com.example.facebook.FacebookAutomationManager.toggleAutoResponder(enabled)
+    fun fbUpdatePollInterval(sec: Int) = com.example.facebook.FacebookAutomationManager.updatePollInterval(sec)
+    fun fbSendManualReply(comment: com.example.facebook.FacebookCommentItem, reply: String) = com.example.facebook.FacebookAutomationManager.sendManualReply(comment, reply)
+    fun fbAddRule(keywords: String, reply: String) = com.example.facebook.FacebookAutomationManager.addOrUpdateRule(keywords, reply)
+    fun fbToggleRule(id: String, enabled: Boolean) = com.example.facebook.FacebookAutomationManager.toggleRuleEnabled(id, enabled)
+    fun fbDeleteRule(id: String) = com.example.facebook.FacebookAutomationManager.deleteRule(id)
+    fun fbClearLogs() = com.example.facebook.FacebookAutomationManager.clearLogs()
+    fun fbDismissStatus() = com.example.facebook.FacebookAutomationManager.dismissStatus()
+
+    fun launchFacebookUiAutomation(goalPrompt: String) {
+        refreshAccessibilityStatus()
+        _executionMode.value = AgentExecutionMode.CONTINUOUS_MONITOR
+        _goalText.value = goalPrompt
+        AgentCoordinator.startTask(goalPrompt, AgentExecutionMode.CONTINUOUS_MONITOR)
     }
 }

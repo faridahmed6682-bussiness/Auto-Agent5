@@ -82,10 +82,15 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val cachedActions by viewModel.cachedActions.collectAsStateWithLifecycle()
     val contacts by viewModel.contacts.collectAsStateWithLifecycle()
     val carromTransferStatus by viewModel.carromTransferStatus.collectAsStateWithLifecycle()
+    val fbConfig by viewModel.fbConfig.collectAsStateWithLifecycle()
+    val fbPosts by viewModel.fbPosts.collectAsStateWithLifecycle()
+    val fbIsBusy by viewModel.fbIsBusy.collectAsStateWithLifecycle()
+    val fbStatusMessage by viewModel.fbStatusMessage.collectAsStateWithLifecycle()
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var showContactDialog by remember { mutableStateOf(false) }
     var showCalibrationDialog by rememberSaveable { mutableStateOf(false) }
+    var showFacebookHubDialog by rememberSaveable { mutableStateOf(false) }
     var editingContact by remember { mutableStateOf<ContactProfile?>(null) }
     var autoRequestedProjectionThisSession by rememberSaveable { mutableStateOf(false) }
     var launchPendingAfterProjection by remember { mutableStateOf(false) }
@@ -353,6 +358,14 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 }
 
                 item {
+                    FacebookAutomationQuickCard(
+                        fbConfig = fbConfig,
+                        onOpenFacebookHub = { showFacebookHubDialog = true },
+                        onToggleAutoResponder = viewModel::fbToggleAutoResponder
+                    )
+                }
+
+                item {
                     val isCarromTrainRunning = (agentState is AgentUiState.Running &&
                         CarromCoachHelper.isCarromWatchTrainGoal((agentState as AgentUiState.Running).goal)) ||
                         (agentState is AgentUiState.Paused &&
@@ -513,6 +526,32 @@ fun DashboardScreen(viewModel: AgentViewModel) {
             initialCalibration = carromMemory.boardCalibration,
             onSaveCalibration = viewModel::saveBoardCalibration,
             onDismiss = { showCalibrationDialog = false }
+        )
+    }
+
+    if (showFacebookHubDialog) {
+        FacebookAutomationDialog(
+            config = fbConfig,
+            posts = fbPosts,
+            isBusy = fbIsBusy,
+            statusMessage = fbStatusMessage,
+            isAccessibilityActive = serviceActive,
+            onConnectToken = viewModel::fbConnectToken,
+            onDisconnect = viewModel::fbDisconnect,
+            onSelectPage = viewModel::fbSelectPage,
+            onPublishPost = viewModel::fbPublishOrSchedulePost,
+            onRefreshPosts = viewModel::fbRefreshPosts,
+            onRunAutoReplyOnce = viewModel::fbRunAutoReplyOnce,
+            onToggleAutoResponder = viewModel::fbToggleAutoResponder,
+            onUpdatePollInterval = viewModel::fbUpdatePollInterval,
+            onSendManualReply = viewModel::fbSendManualReply,
+            onAddRule = viewModel::fbAddRule,
+            onToggleRule = viewModel::fbToggleRule,
+            onDeleteRule = viewModel::fbDeleteRule,
+            onClearLogs = viewModel::fbClearLogs,
+            onLaunchFbUiGoal = viewModel::launchFacebookUiAutomation,
+            onDismissStatus = viewModel::fbDismissStatus,
+            onDismiss = { showFacebookHubDialog = false }
         )
     }
 }

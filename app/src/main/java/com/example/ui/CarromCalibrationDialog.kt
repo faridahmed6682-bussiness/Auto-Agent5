@@ -825,33 +825,67 @@ fun CarromCalibrationDialog(
                     )
                 }
 
-                // Max Pull Power Scale Slider
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                // Precision Physics & Slingshot Tuning Sliders
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SlateSurface),
+                    border = BorderStroke(1.dp, SlateBorder),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "Slingshot Pull Power Scale",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = String.format(Locale.US, "%.2fx", profile.maxPullScale),
-                            style = MaterialTheme.typography.labelMedium,
+                            text = "Aim & Slingshot Fine-Tuning",
+                            style = MaterialTheme.typography.titleSmall,
                             color = ElectricCyan,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        CalibrationTuningSlider(
+                            label = "Slingshot Pull Power Scale",
+                            valueText = String.format(Locale.US, "%.2fx", profile.maxPullScale),
+                            value = profile.maxPullScale,
+                            range = 0.65f..1.45f,
+                            onValueChange = { profile = profile.copy(enabled = true, maxPullScale = it.coerceIn(0.65f, 1.45f)) }
+                        )
+                        CalibrationTuningSlider(
+                            label = "Slingshot Deadzone (min grab)",
+                            valueText = "${profile.slingshotDeadzonePx.toInt()} px",
+                            value = profile.slingshotDeadzonePx,
+                            range = 0f..54f,
+                            onValueChange = { profile = profile.copy(enabled = true, slingshotDeadzonePx = it.coerceIn(0f, 60f)) }
+                        )
+                        CalibrationTuningSlider(
+                            label = "Pull Curve Gamma (soft vs hard)",
+                            valueText = String.format(Locale.US, "%.2f", profile.slingshotCurveGamma),
+                            value = profile.slingshotCurveGamma,
+                            range = 0.75f..1.35f,
+                            onValueChange = { profile = profile.copy(enabled = true, slingshotCurveGamma = it.coerceIn(0.75f, 1.35f)) }
+                        )
+                        CalibrationTuningSlider(
+                            label = "Cut-Throw Compensation",
+                            valueText = String.format(Locale.US, "%.2fx", profile.cutThrowBias),
+                            value = profile.cutThrowBias,
+                            range = 0f..1.8f,
+                            onValueChange = { profile = profile.copy(enabled = true, cutThrowBias = it.coerceIn(0f, 2.0f)) }
+                        )
+                        CalibrationTuningSlider(
+                            label = "Coin Size Ratio",
+                            valueText = String.format(Locale.US, "%.3f", profile.coinRadiusRatio),
+                            value = profile.coinRadiusRatio,
+                            range = 0.020f..0.042f,
+                            onValueChange = { profile = profile.copy(enabled = true, coinRadiusRatio = it.coerceIn(0.018f, 0.048f)) }
+                        )
+                        CalibrationTuningSlider(
+                            label = "Striker Size Ratio",
+                            valueText = String.format(Locale.US, "%.3f", profile.strikerRadiusRatio),
+                            value = profile.strikerRadiusRatio,
+                            range = 0.026f..0.050f,
+                            onValueChange = { profile = profile.copy(enabled = true, strikerRadiusRatio = it.coerceIn(0.024f, 0.058f)) }
                         )
                     }
-                    Slider(
-                        value = profile.maxPullScale,
-                        onValueChange = { profile = profile.copy(enabled = true, maxPullScale = it.coerceIn(0.65f, 1.45f)) },
-                        valueRange = 0.65f..1.45f,
-                        colors = SliderDefaults.colors(
-                            thumbColor = ElectricCyan,
-                            activeTrackColor = CyberTeal
-                        )
-                    )
                 }
 
                 // Bottom Save / Reset Row
@@ -1006,3 +1040,41 @@ private fun createSampleCarromBoardBitmap(): Bitmap {
 
     return bm
 }
+
+@Composable
+private fun CalibrationTuningSlider(
+    label: String,
+    valueText: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onValueChange: (Float) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = valueText,
+                style = MaterialTheme.typography.labelSmall,
+                color = ElectricCyan,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = range,
+            colors = SliderDefaults.colors(
+                thumbColor = ElectricCyan,
+                activeTrackColor = CyberTeal
+            )
+        )
+    }
+}
+

@@ -3,9 +3,12 @@ package com.example.game
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.acos
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sin
 
 enum class CoinColor {
     WHITE,
@@ -285,16 +288,25 @@ object CarromGeometrySolver {
 
                     if (bestDirect == null || score > bestDirect.confidenceScore) {
                         val powerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
-                        val calPullScale = shotMemory?.boardCalibration?.takeIf { it.enabled }?.maxPullScale ?: 1.0f
+                        val cal = shotMemory?.boardCalibration?.takeIf { it.enabled }
+                        val calPullScale = cal?.maxPullScale ?: 1.0f
+                        val compDir = applyCutThrowCompensation(
+                            shotDir = dirSg,
+                            coinDir = dirCp,
+                            cutAngleDeg = cutAngleDeg,
+                            throwBias = cal?.cutThrowBias ?: 1.0f
+                        )
                         val dragEnd = computeSlingshotDragEnd(
                             strikerPos = strikerPos,
-                            shotDir = dirSg,
+                            shotDir = compDir,
                             totalDistance = distStrikerGhost + distCoinPocket,
                             boardWidth = board.width,
                             screenWidth = screenWidth,
                             screenHeight = screenHeight,
                             cutAngleDeg = cutAngleDeg,
-                            powerMultiplier = effectiveMult * calPullScale
+                            powerMultiplier = effectiveMult * calPullScale,
+                            deadzonePx = cal?.slingshotDeadzonePx ?: 22f,
+                            curveGamma = cal?.slingshotCurveGamma ?: 1.0f
                         )
                         val shotLabel = if (trainingMatch != null) "Trained" else if (isHanger) "Hanger" else "Direct"
                         val pocketLabel = CarromMemoryData.pocketName(pocketIdx)
@@ -818,16 +830,30 @@ object CarromGeometrySolver {
             ((sim.verifiedPullMultiplier * 0.7f + it * 0.3f) * matchPowerGain).coerceIn(0.72f, 1.48f)
         }
         val powerStyle = CarromPowerStyle.fromPullMultiplier(effectiveMult)
-        val calPullScale = shotMemory?.boardCalibration?.takeIf { it.enabled }?.maxPullScale ?: 1.0f
+        val cal = shotMemory?.boardCalibration?.takeIf { it.enabled }
+        val calPullScale = cal?.maxPullScale ?: 1.0f
+        val compVerifiedDir = if (!winner.isBreakShot && !winner.isComboShot) {
+            val targetDir = (winner.targetPocket - winner.targetCoin.center).normalized()
+            applyCutThrowCompensation(
+                shotDir = sim.verifiedDir,
+                coinDir = targetDir,
+                cutAngleDeg = winner.cutAngleDeg,
+                throwBias = cal?.cutThrowBias ?: 1.0f
+            )
+        } else {
+            sim.verifiedDir
+        }
         val dragEnd = computeSlingshotDragEnd(
             strikerPos = winner.strikerPos,
-            shotDir = sim.verifiedDir,
+            shotDir = compVerifiedDir,
             totalDistance = winner.totalDistance,
             boardWidth = board.width,
             screenWidth = screenWidth,
             screenHeight = screenHeight,
             cutAngleDeg = winner.cutAngleDeg,
-            powerMultiplier = effectiveMult * calPullScale
+            powerMultiplier = effectiveMult * calPullScale,
+            deadzonePx = cal?.slingshotDeadzonePx ?: 22f,
+            curveGamma = cal?.slingshotCurveGamma ?: 1.0f
         )
         val kindTag = when {
             winner.isBreakShot -> "T3-Break"
@@ -1381,6 +1407,33 @@ object CarromGeometrySolver {
             p.y in (board.top + margin)..(board.bottom - margin)
     }
 
+    /**
+     * Compensates for frictional cut-induced throw on oblique cuts (12°..62°):
+     * nudges the striker aim slightly fuller into the target coin (~0.35°–1.35° * throwBias)
+     * so contact friction doesn't under-cut the coin into the near pocket jaw.
+     */
+    internal fun applyCutThrowCompensation(
+        shotDir: Point2D,
+        coinDir: Point2D,
+        cutAngleDeg: Float,
+        throwBias: Float = 1.0f
+    ): Point2D {
+        if (cutAngleDeg < 12f || cutAngleDeg > 62f || throwBias <= 0.02f) return shotDir
+        // Cross product z-component determines which side of target coin we are cutting
+        val crossZ = shotDir.x * coinDir.y - shotDir.y * coinDir.x
+        if (abs(crossZ) < 1e-4f) return shotDir
+        val sinFactor = sin((cutAngleDeg.coerceIn(12f, 60f) * PI / 180.0)).toFloat()
+        // Max ~1.35 deg full compensation at 1.0x bias on steep cuts
+        val compDeg = (1.35f * sinFactor * throwBias.coerceIn(0f, 2f)) * if (crossZ > 0f) 1f else -1f
+        val rad = (compDeg * PI / 180.0).toFloat()
+        val c = cos(rad)
+        val s = sin(rad)
+        return Point2D(
+            x = shotDir.x * c - shotDir.y * s,
+            y = shotDir.x * s + shotDir.y * c
+        ).normalized()
+    }
+
     internal fun computeSlingshotDragEnd(
         strikerPos: Point2D,
         shotDir: Point2D,
@@ -1389,16 +1442,20 @@ object CarromGeometrySolver {
         screenWidth: Int,
         screenHeight: Int,
         cutAngleDeg: Float = 0f,
-        powerMultiplier: Float = 1.0f
+        powerMultiplier: Float = 1.0f,
+        deadzonePx: Float = 22f,
+        curveGamma: Float = 1.0f
     ): Point2D {
         // Momentum transfer scales with cos(cutAngle), so angled cuts need ~1/cos(theta) stronger pull
         val cutRad = (cutAngleDeg.coerceIn(0f, 68f) * PI / 180.0)
-        val cutCompensation = (1.0 / kotlin.math.cos(cutRad)).toFloat().coerceIn(1.0f, 1.85f)
+        val cutCompensation = (1.0 / cos(cutRad)).toFloat().coerceIn(1.0f, 1.85f)
         val basePower = (totalDistance / boardWidth).coerceIn(0.45f, 1.35f)
         val effectivePower = (basePower * cutCompensation * powerMultiplier).coerceIn(0.45f, 1.75f)
-        val minPull = max(132f, boardWidth * 0.19f)
-        val maxPull = min(400f, boardWidth * 0.44f).coerceAtLeast(minPull + 20f)
-        val pullLength = (boardWidth * 0.28f * effectivePower).coerceIn(minPull, maxPull)
+        val normForce = ((effectivePower - 0.45f) / (1.75f - 0.45f)).coerceIn(0f, 1f)
+        val shapedForce = normForce.pow(curveGamma.coerceIn(0.75f, 1.35f))
+        val minPull = max(124f + deadzonePx.coerceIn(0f, 60f) * 0.5f, boardWidth * 0.19f)
+        val maxPull = min(410f, boardWidth * 0.45f).coerceAtLeast(minPull + 24f)
+        val pullLength = (minPull + shapedForce * (maxPull - minPull)).coerceIn(minPull, maxPull)
         val pullVec = Point2D(-shotDir.x * pullLength, -shotDir.y * pullLength)
 
         val minX = 28f

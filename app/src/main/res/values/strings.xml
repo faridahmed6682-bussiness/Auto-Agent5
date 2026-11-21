@@ -144,4 +144,8 @@
     <string name="action_open_calibration">Board &amp; Aim Calibration Tool</string>
     <string name="cd_close_calibration">Close calibration tool</string>
     <string name="cd_calibration_preview">Interactive Carrom board screenshot calibration canvas</string>
+    <string name="fb_hub_title">Facebook Automation Hub</string>
+    <string name="fb_hub_desc">Automate Facebook Pages via Meta Graph API (live/scheduled posts &amp; keyword auto-comment responder) plus TapPilot screen bots for Messenger &amp; Groups.</string>
+    <string name="action_open_fb_hub">Open Facebook Automation Hub</string>
+    <string name="cd_close_fb_hub">Close Facebook Automation Hub</string>
 </resources>
