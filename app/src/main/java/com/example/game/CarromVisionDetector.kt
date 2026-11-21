@@ -151,6 +151,21 @@ object CarromVisionDetector {
             }
         }
 
+        val baselineFraction = activeCal?.baselineYNorm ?: 0.845f
+
+        // 1b. Turn-glow centre (cheap, skin-independent): the green halo
+        // around the bottom striker. Computed early so the knob decision
+        // and the striker anchor can use it as a cross-check.
+        val glowCenter = detectBottomTurnGlowCenter(
+            bitmap = screenshot,
+            boardLeft = boardBmLeft,
+            boardTop = boardBmTop,
+            boardRight = boardBmRight,
+            boardBottom = boardBmBottom,
+            baselineFraction = baselineFraction
+        )
+        val glowX = glowCenter.center?.x
+
         // 2. Detect bottom slider knob (uses calibrated slider track band if enabled)
         val sliderKnobPx = detectBottomSliderKnob(
             bitmap = screenshot,
@@ -159,7 +174,8 @@ object CarromVisionDetector {
             boardBottom = boardBmBottom,
             scaleX = scaleX,
             scaleY = scaleY,
-            calibration = activeCal
+            calibration = activeCal,
+            glowCenterX = glowX
         )
 
         val boardLeft = boardBmLeft * scaleX
@@ -173,7 +189,6 @@ object CarromVisionDetector {
         val strikerRadius = boardWidthPx * (activeCal?.strikerRadiusRatio ?: 0.036f)
         val pocketRadius = boardWidthPx * 0.052f
         val pocketInset = boardWidthPx * 0.064f
-        val baselineFraction = activeCal?.baselineYNorm ?: 0.845f
 
         // 3. Scan board region into clustered pieces (using Hough Circle separation for touching break clusters)
         val rawPieces = detectBoardPieces(
@@ -202,15 +217,37 @@ object CarromVisionDetector {
         }
         val defaultBaselineY = boardTop + boardHeightPx * baselineFraction
 
-        // 4. Color-agnostic bottom baseline striker detection (matches ANY striker color/skin/halo)
+        // 4. Striker anchor vote (skin-independent): the slider knob x, the
+        // turn-glow centroid x, and the nearest STRIKER-coloured fragment
+        // vote on the striker's x. Two agreeing signals win; the knob is
+        // the exact slider mapping, so it wins ties. A yellow board marker
+        // ~185px away can never vote (0.06 * board width window).
+        val appearanceVoteX: Float? = run {
+            val refX = glowX ?: sliderKnobPx?.x ?: return@run null
+            rawPieces
+                .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
+                .minByOrNull { p -> abs(p.center.x - refX) }
+                ?.takeIf { p -> abs(p.center.x - refX) <= boardWidthPx * 0.06f }
+                ?.center?.x
+        }
+        val anchorX = resolveStrikerAnchorX(
+            sliderKnobPx = sliderKnobPx,
+            glowCenterX = glowX,
+            appearanceX = appearanceVoteX,
+            boardWidthPx = boardWidthPx
+        )
+
+        // 4b. Color-agnostic bottom baseline striker detection (matches ANY striker color/skin/halo)
         val rawStrikerAligned = rawPieces
             .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
             .minByOrNull { p ->
-                if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
+                if (anchorX != null) abs(p.center.x - anchorX)
+                else if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
                 else abs(p.center.y - defaultBaselineY)
             }
             ?.takeIf { p ->
-                sliderKnobPx == null || abs(p.center.x - sliderKnobPx.x) <= boardWidthPx * 0.18f
+                if (anchorX != null) abs(p.center.x - anchorX) <= boardWidthPx * 0.06f
+                else sliderKnobPx == null || abs(p.center.x - sliderKnobPx.x) <= boardWidthPx * 0.18f
             }
 
         val scanBandTop = (baselineFraction - 0.145f).coerceIn(0.62f, 0.85f)
@@ -263,7 +300,13 @@ object CarromVisionDetector {
             boardRight = boardRight,
             boardHeightPx = boardHeightPx,
             strikerRadiusPx = strikerRadius,
-            sliderKnobPx = sliderKnobPx
+            sliderKnobPx = sliderKnobPx,
+            anchorStrikerX = anchorX,
+            coinRadiusPx = coinRadius,
+            // Face-fragment cleaning only when the anchor is trusted: the
+            // knob is present and the glow does not actively disagree.
+            cleanFaceFragments = sliderKnobPx != null &&
+                (glowX == null || abs(sliderKnobPx.x - glowX) <= boardWidthPx * 0.10f)
         )
 
         if (promoted.isEmpty()) {
@@ -316,14 +359,8 @@ object CarromVisionDetector {
             // top baseline, it is our turn right now — do not burn the wait
             // budget, play immediately. This only accelerates the fallback
             // assumption below; it never fires a shot by itself.
-            turnBannerDetected = detectedTopStriker == null && detectBottomTurnGlow(
-                bitmap = screenshot,
-                boardLeft = boardBmLeft,
-                boardTop = boardBmTop,
-                boardRight = boardBmRight,
-                boardBottom = boardBmBottom,
-                baselineFraction = baselineFraction
-            )
+            // Glow already scanned up front; reuse it (no second scan).
+            turnBannerDetected = detectedTopStriker == null && glowCenter.detected
             val maxTurnWaitCycles = when {
                 turnBannerDetected -> 0
                 detectedTopStriker != null -> if (isLiveStream) 36 else 12
@@ -635,6 +672,20 @@ object CarromVisionDetector {
         val meanDiff = if (prevLuma != null) computeMeanAbsDiff(prevLuma, currentLuma) else 0f
         val isInMotion = prevLuma != null && meanDiff > (MOTION_THRESHOLD * 0.90f)
 
+        val baselineFraction = activeCal?.baselineYNorm ?: 0.845f
+
+        // Turn-glow centre, computed early (same as analyzeAndSolve): the
+        // knob decision and the striker anchor use it as a cross-check.
+        val glowCenter = detectBottomTurnGlowCenter(
+            bitmap = screenshot,
+            boardLeft = boardBmLeft,
+            boardTop = boardBmTop,
+            boardRight = boardBmRight,
+            boardBottom = boardBmBottom,
+            baselineFraction = baselineFraction
+        )
+        val glowX = glowCenter.center?.x
+
         val sliderKnobPx = detectBottomSliderKnob(
             bitmap = screenshot,
             boardLeft = boardBmLeft,
@@ -642,7 +693,8 @@ object CarromVisionDetector {
             boardBottom = boardBmBottom,
             scaleX = scaleX,
             scaleY = scaleY,
-            calibration = activeCal
+            calibration = activeCal,
+            glowCenterX = glowX
         )
 
         val boardLeft = boardBmLeft * scaleX
@@ -655,7 +707,6 @@ object CarromVisionDetector {
         val strikerRadius = boardWidthPx * (activeCal?.strikerRadiusRatio ?: 0.036f)
         val pocketRadius = boardWidthPx * 0.052f
         val pocketInset = boardWidthPx * 0.064f
-        val baselineFraction = activeCal?.baselineYNorm ?: 0.845f
 
         val rawPieces = detectBoardPieces(
             bitmap = screenshot,
@@ -672,14 +723,32 @@ object CarromVisionDetector {
         )
 
         val defaultBaselineY = boardTop + boardHeightPx * baselineFraction
+        // Striker anchor vote (same as analyzeAndSolve): knob x + glow
+        // centroid x + nearest STRIKER fragment vote on the striker's x.
+        val appearanceVoteX: Float? = run {
+            val refX = glowX ?: sliderKnobPx?.x ?: return@run null
+            rawPieces
+                .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
+                .minByOrNull { p -> abs(p.center.x - refX) }
+                ?.takeIf { p -> abs(p.center.x - refX) <= boardWidthPx * 0.06f }
+                ?.center?.x
+        }
+        val anchorX = resolveStrikerAnchorX(
+            sliderKnobPx = sliderKnobPx,
+            glowCenterX = glowX,
+            appearanceX = appearanceVoteX,
+            boardWidthPx = boardWidthPx
+        )
         val rawStrikerAligned = rawPieces
             .filter { it.color == CoinColor.STRIKER && it.radiusPx >= strikerRadius * 0.58f }
             .minByOrNull { p ->
-                if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
+                if (anchorX != null) abs(p.center.x - anchorX)
+                else if (sliderKnobPx != null) abs(p.center.x - sliderKnobPx.x)
                 else abs(p.center.y - defaultBaselineY)
             }
             ?.takeIf { p ->
-                sliderKnobPx == null || abs(p.center.x - sliderKnobPx.x) <= boardWidthPx * 0.18f
+                if (anchorX != null) abs(p.center.x - anchorX) <= boardWidthPx * 0.06f
+                else sliderKnobPx == null || abs(p.center.x - sliderKnobPx.x) <= boardWidthPx * 0.18f
             }
         val scanBandTop = (baselineFraction - 0.145f).coerceIn(0.62f, 0.85f)
         val scanBandBottom = (baselineFraction + 0.095f).coerceIn(scanBandTop + 0.08f, 0.96f)
@@ -716,7 +785,11 @@ object CarromVisionDetector {
             boardRight = boardRight,
             boardHeightPx = boardHeightPx,
             strikerRadiusPx = strikerRadius,
-            sliderKnobPx = sliderKnobPx
+            sliderKnobPx = sliderKnobPx,
+            anchorStrikerX = anchorX,
+            coinRadiusPx = coinRadius,
+            cleanFaceFragments = sliderKnobPx != null &&
+                (glowX == null || abs(sliderKnobPx.x - glowX) <= boardWidthPx * 0.10f)
         )
         val strikerPiece = promoted.firstOrNull { it.color == CoinColor.STRIKER }
         // Only during opponent's turn (bottom striker & slider absent), detect opponent striker on top baseline
@@ -911,7 +984,10 @@ object CarromVisionDetector {
         boardBottom: Int,
         scaleX: Float,
         scaleY: Float,
-        calibration: BoardCalibrationProfile? = null
+        calibration: BoardCalibrationProfile? = null,
+        // Turn-glow centroid x (halo around the real striker): breaks ties
+        // when the vivid and contrast candidates disagree.
+        glowCenterX: Float? = null
     ): Point2D? {
         val sliderTop: Int
         val sliderBottom: Int
@@ -993,7 +1069,12 @@ object CarromVisionDetector {
                 }
             }
         }
-        if (bestCenter != null) return bestCenter
+        // NOTE: no early return here. The vivid pass alone cannot be
+        // trusted for patterned skins: on the user's monster-skin board the
+        // largest vivid blob is the slider track's gold end cap, not the
+        // knob. The contrast pass below is the primary signal; vivid is
+        // only a cross-check (see the decision at the end).
+        val vividBest = bestCenter
 
         // Fallback: row-wise track-contrast check catches patterned/brown/dark/custom striker skins inside the slider bar
         val trackColStart = if (calibration != null && calibration.enabled) 0 else (cols * 0.18f).toInt().coerceIn(0, cols - 1)
@@ -1087,7 +1168,26 @@ object CarromVisionDetector {
                 }
             }
         }
-        return contrastBestCenter ?: contrastLargestCenter
+        // Decide: contrast is primary (on the measured boards the real knob
+        // is the largest contrast blob, 247-333 samples, while the track
+        // end caps are ~130-150). Vivid agrees when it found the same disc.
+        // On disagreement the glow centroid — the halo around the real
+        // striker — breaks the tie.
+        val contrastPick = contrastBestCenter ?: contrastLargestCenter
+        val trackWidthPx = (boardRight - boardLeft) * scaleX
+        return when {
+            contrastPick != null && vividBest != null -> {
+                if (abs(contrastPick.x - vividBest.x) <= trackWidthPx * 0.10f) {
+                    contrastPick
+                } else if (glowCenterX != null) {
+                    if (abs(contrastPick.x - glowCenterX) <= abs(vividBest.x - glowCenterX)) contrastPick else vividBest
+                } else {
+                    contrastPick
+                }
+            }
+            contrastPick != null -> contrastPick
+            else -> vividBest
+        }
     }
 
     private fun promoteOrAnchorStriker(
@@ -1097,8 +1197,43 @@ object CarromVisionDetector {
         boardRight: Float,
         boardHeightPx: Float,
         strikerRadiusPx: Float,
-        sliderKnobPx: Point2D?
+        sliderKnobPx: Point2D?,
+        // Skin-independent anchor x (knob + glow + appearance vote).
+        // When present it IS the striker x — any appearance-matched
+        // "striker" far from it is a board marker, not the striker.
+        anchorStrikerX: Float? = null,
+        coinRadiusPx: Float = 0f,
+        // Drop face fragments (mislabelled queen/white bits of a
+        // decorated striker skin) only when the anchor is trusted.
+        cleanFaceFragments: Boolean = false
     ): List<CarromPiece> {
+        if (anchorStrikerX != null) {
+            val clampedX = anchorStrikerX.coerceIn(
+                boardLeft + strikerRadiusPx * 2.1f,
+                boardRight - strikerRadiusPx * 2.1f
+            )
+            val anchored = CarromPiece(
+                color = CoinColor.STRIKER,
+                center = Point2D(clampedX, baselineY),
+                radiusPx = strikerRadiusPx
+            )
+            // A decorated striker's face fragments (red/white bits of the
+            // skin) can be mislabelled as queen/white coins sitting on the
+            // striker. A real coin's centre can never be closer than
+            // strikerRadius + coinRadius to the striker's centre (the discs
+            // cannot overlap), so anything nearer is face, not a coin.
+            val clearR = if (cleanFaceFragments && coinRadiusPx > 0f) {
+                (strikerRadiusPx + coinRadiusPx) * 0.95f
+            } else {
+                0f
+            }
+            val rest = pieces.filter { piece ->
+                piece.color != CoinColor.STRIKER &&
+                    (clearR <= 0f || (piece.center - anchored.center).length() >= clearR)
+            }
+            return rest + anchored
+        }
+
         if (pieces.any { it.color == CoinColor.STRIKER }) return pieces
 
         val baselineTolerance = boardHeightPx * 0.085f
@@ -1323,14 +1458,33 @@ object CarromVisionDetector {
      * threshold at once. Only used to skip the wait budget when no opponent
      * striker is visible on the top baseline — never to fire a shot alone.
      */
-    private fun detectBottomTurnGlow(
+    /**
+     * "Your turn" glow halo around the bottom striker, with its centre.
+     * The halo is the most skin-independent striker locator on the board:
+     * its green part belongs ONLY to the halo (the yellow baseline
+     * end-circles are yellow, not green), so the green-only centroid sits
+     * on the striker within a few px. Falls back to the densest glow
+     * cluster, then to the plain centroid.
+     */
+    private data class TurnGlowCenter(
+        val center: Point2D?,
+        val samples: Int,
+        val spanPx: Int,
+        val greenSamples: Int
+    ) {
+        // Same thresholds as before: dense AND wide, so a single coin on
+        // the baseline can never count as a turn signal.
+        val detected: Boolean get() = samples >= 120 && spanPx >= 56
+    }
+
+    private fun detectBottomTurnGlowCenter(
         bitmap: Bitmap,
         boardLeft: Int,
         boardTop: Int,
         boardRight: Int,
         boardBottom: Int,
         baselineFraction: Float
-    ): Boolean {
+    ): TurnGlowCenter {
         val bw = (boardRight - boardLeft).coerceAtLeast(40)
         val bh = (boardBottom - boardTop).coerceAtLeast(40)
         val scanLeft = (boardLeft + (bw * 0.14f).toInt()).coerceIn(0, bitmap.width - 2)
@@ -1339,12 +1493,19 @@ object CarromVisionDetector {
         val scanBottom = (boardTop + (bh * (baselineFraction + 0.085f)).toInt()).coerceIn(scanTop + 2, bitmap.height - 1)
         val cols = ((scanRight - scanLeft) / SAMPLE_STEP).coerceAtLeast(1)
         val rows = ((scanBottom - scanTop) / SAMPLE_STEP).coerceAtLeast(1)
-        if (cols < 4 || rows < 3) return false
+        if (cols < 4 || rows < 3) return TurnGlowCenter(null, 0, 0, 0)
 
         val hsv = FloatArray(3)
         var glowSamples = 0
         var minGlowX = Int.MAX_VALUE
         var maxGlowX = Int.MIN_VALUE
+        var sumX = 0f
+        var sumY = 0f
+        var greenSumX = 0f
+        var greenSumY = 0f
+        var greenSamples = 0
+        val glowXs = ArrayList<Int>()
+        val glowYs = ArrayList<Int>()
         for (r in 0 until rows) {
             val py = (scanTop + r * SAMPLE_STEP).coerceIn(0, bitmap.height - 1)
             for (c in 0 until cols) {
@@ -1353,16 +1514,119 @@ object CarromVisionDetector {
                 val h = hsv[0]
                 val s = hsv[1]
                 val v = hsv[2]
-                val isGlow = (h in 85f..155f && s >= 0.42f && v >= 0.42f) ||
-                    (h in 36f..62f && s >= 0.56f && v >= 0.70f)
-                if (isGlow) {
+                val isGreen = h in 85f..155f && s >= 0.42f && v >= 0.42f
+                val isYellow = h in 36f..62f && s >= 0.56f && v >= 0.70f
+                if (isGreen || isYellow) {
                     glowSamples++
+                    sumX += px
+                    sumY += py
+                    glowXs.add(px)
+                    glowYs.add(py)
                     if (px < minGlowX) minGlowX = px
                     if (px > maxGlowX) maxGlowX = px
                 }
+                if (isGreen) {
+                    greenSamples++
+                    greenSumX += px
+                    greenSumY += py
+                }
             }
         }
-        return glowSamples >= 120 && (maxGlowX - minGlowX) >= 56
+        val spanPx = if (glowSamples > 0) maxGlowX - minGlowX else 0
+        val center: Point2D? = when {
+            greenSamples >= 8 -> Point2D(greenSumX / greenSamples, greenSumY / greenSamples)
+            glowSamples > 0 -> {
+                // Densest 40px window, then the mean of the glow pixels
+                // within +-60px of its centre (robust to the symmetric
+                // yellow end-circles pulling a plain centroid).
+                val sortedXs = glowXs.sorted()
+                var winSum = 0f
+                var winJ = 0
+                var bestCount = 0
+                var bestMean = 0f
+                for (i in sortedXs.indices) {
+                    winSum += sortedXs[i]
+                    while (sortedXs[winJ] < sortedXs[i] - 40) {
+                        winSum -= sortedXs[winJ]
+                        winJ++
+                    }
+                    val count = i - winJ + 1
+                    if (count > bestCount) {
+                        bestCount = count
+                        bestMean = winSum / count
+                    }
+                }
+                var nearSumX = 0f
+                var nearSumY = 0f
+                var nearCount = 0
+                for (k in glowXs.indices) {
+                    if (abs(glowXs[k] - bestMean) <= 60f) {
+                        nearSumX += glowXs[k]
+                        nearSumY += glowYs[k]
+                        nearCount++
+                    }
+                }
+                if (nearCount > 0) Point2D(nearSumX / nearCount, nearSumY / nearCount)
+                else Point2D(sumX / glowSamples, sumY / glowSamples)
+            }
+            else -> null
+        }
+        return TurnGlowCenter(center, glowSamples, spanPx, greenSamples)
+    }
+
+    /**
+     * Second "whose turn is it" signal: the bottom turn-glow halo is bright
+     * green/yellow AND wide (only when YOUR striker sits on your baseline,
+     * with the halo around it). The single-coin-on-the-baseline problem is
+     * avoided by requiring a wide span AND many samples. A piece placed on
+     * the baseline cannot be large enough or bright enough to match, so it
+     * won't trigger this.
+     */
+    private fun detectBottomTurnGlow(
+        bitmap: Bitmap,
+        boardLeft: Int,
+        boardTop: Int,
+        boardRight: Int,
+        boardBottom: Int,
+        baselineFraction: Float
+    ): Boolean {
+        return detectBottomTurnGlowCenter(
+            bitmap = bitmap,
+            boardLeft = boardLeft,
+            boardTop = boardTop,
+            boardRight = boardRight,
+            boardBottom = boardBottom,
+            baselineFraction = baselineFraction
+        ).detected
+    }
+
+    /**
+     * Skin-independent striker anchor: the slider knob x, the turn-glow
+     * centroid x, and the nearest STRIKER-coloured fragment vote on the
+     * striker's x. Two agreeing signals win; the knob is the exact slider
+     * mapping, so it wins ties. The glow's green centroid is the most
+     * precise single signal (measured within ~2px of the true striker),
+     * so it wins an uncorroborated disagreement.
+     */
+    private fun resolveStrikerAnchorX(
+        sliderKnobPx: Point2D?,
+        glowCenterX: Float?,
+        appearanceX: Float?,
+        boardWidthPx: Float
+    ): Float? {
+        val knobX = sliderKnobPx?.x
+        if (knobX != null && glowCenterX != null) {
+            if (abs(knobX - glowCenterX) <= boardWidthPx * 0.10f) return knobX
+            if (appearanceX != null) {
+                val voteTol = boardWidthPx * 0.06f
+                val backsKnob = abs(appearanceX - knobX) <= voteTol && abs(appearanceX - glowCenterX) > voteTol
+                val backsGlow = abs(appearanceX - glowCenterX) <= voteTol && abs(appearanceX - knobX) > voteTol
+                if (backsKnob) return knobX
+                if (backsGlow) return glowCenterX
+            }
+            return glowCenterX
+        }
+        return glowCenterX ?: knobX
     }
 
     private fun detectVividStrikerOnBand(
