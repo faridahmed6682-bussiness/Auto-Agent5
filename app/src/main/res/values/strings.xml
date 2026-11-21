@@ -148,4 +148,8 @@
     <string name="fb_hub_desc">Automate Facebook Pages via Meta Graph API (live/scheduled posts &amp; keyword auto-comment responder) plus TapPilot screen bots for Messenger &amp; Groups.</string>
     <string name="action_open_fb_hub">Open Facebook Automation Hub</string>
     <string name="cd_close_fb_hub">Close Facebook Automation Hub</string>
+    <string name="wa_hub_title">WhatsApp Pairing Connector</string>
+    <string name="wa_hub_desc">Connect your companion Node.js Baileys server with an 8-digit WhatsApp Pairing Code for 24/7 AI auto-replies in background.</string>
+    <string name="action_open_wa_hub">Open WhatsApp Pairing Hub</string>
+    <string name="cd_close_wa_hub">Close WhatsApp Pairing Hub</string>
 </resources>

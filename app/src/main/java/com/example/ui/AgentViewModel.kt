@@ -35,6 +35,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     init {
         AgentCoordinator.initialize(application.applicationContext)
         com.example.facebook.FacebookAutomationManager.initialize(application.applicationContext)
+        com.example.whatsapp.WhatsAppBridgeManager.initialize(application.applicationContext)
     }
 
     val agentState: StateFlow<AgentUiState> = AgentCoordinator.uiState
@@ -50,6 +51,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val fbPosts: StateFlow<List<com.example.facebook.FacebookPostSummary>> = com.example.facebook.FacebookAutomationManager.posts
     val fbIsBusy: StateFlow<Boolean> = com.example.facebook.FacebookAutomationManager.isBusy
     val fbStatusMessage: StateFlow<String?> = com.example.facebook.FacebookAutomationManager.statusMessage
+    val waConfig: StateFlow<com.example.whatsapp.WhatsAppBridgeConfig> = com.example.whatsapp.WhatsAppBridgeManager.config
+    val waIsBusy: StateFlow<Boolean> = com.example.whatsapp.WhatsAppBridgeManager.isBusy
+    val waStatusBanner: StateFlow<String?> = com.example.whatsapp.WhatsAppBridgeManager.statusBanner
 
     private val _goalText = MutableStateFlow("")
     val goalText: StateFlow<String> = _goalText.asStateFlow()
@@ -274,4 +278,27 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         _goalText.value = goalPrompt
         AgentCoordinator.startTask(goalPrompt, AgentExecutionMode.CONTINUOUS_MONITOR)
     }
+
+    fun waRequestPairingCode(serverUrl: String, bridgeSecret: String, userId: String, phoneNumber: String) {
+        com.example.whatsapp.WhatsAppBridgeManager.requestPairingCode(
+            serverUrl = serverUrl,
+            bridgeSecret = bridgeSecret,
+            userId = userId,
+            phoneNumber = phoneNumber,
+            contacts = contacts.value
+        )
+    }
+
+    fun waCheckStatus() = com.example.whatsapp.WhatsAppBridgeManager.refreshStatus(silent = false)
+
+    fun waSyncRules(autoReplyEnabled: Boolean, aiReplyInstruction: String) {
+        com.example.whatsapp.WhatsAppBridgeManager.syncAutomationRules(
+            autoReplyEnabled = autoReplyEnabled,
+            aiReplyInstruction = aiReplyInstruction,
+            contacts = contacts.value
+        )
+    }
+
+    fun waDisconnect() = com.example.whatsapp.WhatsAppBridgeManager.disconnectSession()
+    fun waDismissBanner() = com.example.whatsapp.WhatsAppBridgeManager.dismissBanner()
 }

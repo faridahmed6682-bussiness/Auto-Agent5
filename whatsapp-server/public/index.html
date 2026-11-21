@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TapPilot WhatsApp Pairing Connector</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="card">
+      <header class="header">
+        <div>
+          <h1>WhatsApp Pairing Connector</h1>
+          <p class="subtitle">Link your WhatsApp via 8-digit pairing code for 24/7 AI Auto-Reply</p>
+        </div>
+        <span id="statusBadge" class="badge badge-disconnected">Disconnected</span>
+      </header>
+
+      <form id="pairForm" class="form">
+        <label for="userIdInput">User ID</label>
+        <input id="userIdInput" type="text" value="tappilot_main" autocomplete="off" required />
+
+        <label for="phoneInput">WhatsApp Phone Number (Country Code, no +)</label>
+        <input
+          id="phoneInput"
+          type="tel"
+          placeholder="88017XXXXXXXX"
+          inputmode="numeric"
+          autocomplete="tel"
+          required
+        />
+
+        <button id="pairBtn" type="submit" class="btn-primary">Connect WhatsApp / Get Pairing Code</button>
+      </form>
+
+      <p id="feedbackText" class="feedback" hidden></p>
+
+      <div id="codeSection" class="code-box" hidden>
+        <div class="code-label">8-Digit WhatsApp Pairing Code</div>
+        <div id="pairingCodeValue" class="pairing-code">--------</div>
+        <button id="copyBtn" type="button" class="btn-secondary">Copy Code</button>
+
+        <ol class="guide-list">
+          <li>কোডটি কপি করুন।</li>
+          <li>ফোনের WhatsApp খুলে Linked Devices &gt; Link a Device চাপুন।</li>
+          <li>নিচে "Link with phone number instead" চেপে কোডটি পেস্ট করুন।</li>
+        </ol>
+      </div>
+
+      <div id="connectedBox" class="connected-box" hidden>
+        <div class="connected-title">Connected ✅</div>
+        <p id="connectedDetail" class="connected-detail"></p>
+        <button id="disconnectBtn" type="button" class="btn-danger">Disconnect WhatsApp</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

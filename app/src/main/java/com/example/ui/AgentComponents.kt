@@ -918,6 +918,133 @@ fun FacebookAutomationQuickCard(
 }
 
 @Composable
+fun WhatsAppConnectorQuickCard(
+    waConfig: com.example.whatsapp.WhatsAppBridgeConfig,
+    onOpenWhatsAppHub: () -> Unit,
+    onToggleAutoReply: (Boolean) -> Unit
+) {
+    val isConnected = waConfig.status == com.example.whatsapp.WhatsAppConnectionStatus.CONNECTED
+    val isPairing = waConfig.status == com.example.whatsapp.WhatsAppConnectionStatus.PAIRING
+    val activeBorderColor by animateColorAsState(
+        targetValue = when {
+            isConnected -> CyberTeal
+            isPairing -> AmberWarning
+            else -> SlateBorder
+        },
+        animationSpec = tween(260),
+        label = "waQuickCardBorder"
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isConnected) CyberTealDark.copy(alpha = 0.35f) else SlateSurface
+        ),
+        border = BorderStroke(1.dp, activeBorderColor),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        tint = if (isConnected) CyberTeal else ElectricCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.wa_hub_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                if (isConnected || isPairing) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isConnected) CyberTealDark else AmberContainer)
+                            .border(
+                                1.dp,
+                                if (isConnected) CyberTeal else AmberWarning,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (isConnected) "CONNECTED ✅" else "PAIRING...",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isConnected) CyberTeal else AmberWarning,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = when {
+                    isConnected -> "Linked: ${waConfig.connectedPhone.ifBlank { waConfig.phoneNumber }} • Replies sent: ${waConfig.totalRepliesSent}"
+                    isPairing && waConfig.pairingCode.isNotBlank() -> "Pairing Code: ${waConfig.pairingCode} (Tap Hub to copy)"
+                    else -> stringResource(R.string.wa_hub_desc)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isConnected) ElectricCyan else TextSecondary
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onOpenWhatsAppHub,
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .height(48.dp)
+                        .testTag("btn_open_wa_hub"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyberTealDark,
+                        contentColor = CyberTeal
+                    ),
+                    border = BorderStroke(1.dp, CyberTeal.copy(alpha = 0.65f))
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = stringResource(R.string.action_open_wa_hub),
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (isConnected) {
+                    Switch(
+                        checked = waConfig.autoReplyEnabled,
+                        onCheckedChange = onToggleAutoReply,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                            checkedTrackColor = CyberTeal
+                        ),
+                        modifier = Modifier.testTag("switch_wa_quick_auto")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun CarromWatchTrainCard(
     isServiceActive: Boolean,
     isRunningThisMode: Boolean,

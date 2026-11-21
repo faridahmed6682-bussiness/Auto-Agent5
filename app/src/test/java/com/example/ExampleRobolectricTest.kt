@@ -1825,6 +1825,50 @@ class ExampleRobolectricTest {
         assertEquals(2, restored.repliedCommentIds.size)
         org.junit.Assert.assertTrue(restored.autoResponderEnabled)
     }
+
+    @Test
+    fun `whatsapp bridge validates server url, user id, phone digits, and config json round-trip`() {
+        assertEquals(
+            "https://wa-bot.example.com",
+            com.example.whatsapp.WhatsAppBridgeRepository.normalizeServerUrl("  https://wa-bot.example.com/ ")
+        )
+        assertEquals(
+            null,
+            com.example.whatsapp.WhatsAppBridgeRepository.normalizeServerUrl("ftp://invalid.example.com")
+        )
+        assertEquals(
+            "8801712345678",
+            com.example.whatsapp.WhatsAppBridgeRepository.cleanDigitsPhone("+880 1712-345678")
+        )
+        org.junit.Assert.assertTrue(com.example.whatsapp.WhatsAppBridgeRepository.isValidUserId("tappilot_main-1"))
+        org.junit.Assert.assertFalse(com.example.whatsapp.WhatsAppBridgeRepository.isValidUserId("../etc/passwd"))
+
+        val cfg = com.example.whatsapp.WhatsAppBridgeConfig(
+            serverUrl = "https://wa-bot.example.com",
+            userId = "tappilot_main",
+            phoneNumber = "8801712345678",
+            pairingCode = "ABCD-EFGH",
+            status = com.example.whatsapp.WhatsAppConnectionStatus.CONNECTED,
+            connectedPhone = "8801712345678",
+            autoReplyEnabled = true,
+            totalRepliesSent = 12,
+            logs = listOf(
+                com.example.whatsapp.WhatsAppBridgeLog(
+                    id = "l1",
+                    timestampMs = 5000L,
+                    title = "Connected ✅",
+                    detail = "Linked cleanly"
+                )
+            )
+        )
+        val decoded = com.example.whatsapp.WhatsAppBridgeConfig.fromJson(cfg.toJson().toString())
+        assertEquals("https://wa-bot.example.com", decoded.serverUrl)
+        assertEquals("8801712345678", decoded.phoneNumber)
+        assertEquals(com.example.whatsapp.WhatsAppConnectionStatus.CONNECTED, decoded.status)
+        assertEquals(12, decoded.totalRepliesSent)
+        assertEquals(1, decoded.logs.size)
+        assertEquals("Connected ✅", decoded.logs[0].title)
+    }
 }
 
 

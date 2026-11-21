@@ -86,11 +86,15 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val fbPosts by viewModel.fbPosts.collectAsStateWithLifecycle()
     val fbIsBusy by viewModel.fbIsBusy.collectAsStateWithLifecycle()
     val fbStatusMessage by viewModel.fbStatusMessage.collectAsStateWithLifecycle()
+    val waConfig by viewModel.waConfig.collectAsStateWithLifecycle()
+    val waIsBusy by viewModel.waIsBusy.collectAsStateWithLifecycle()
+    val waStatusBanner by viewModel.waStatusBanner.collectAsStateWithLifecycle()
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var showContactDialog by remember { mutableStateOf(false) }
     var showCalibrationDialog by rememberSaveable { mutableStateOf(false) }
     var showFacebookHubDialog by rememberSaveable { mutableStateOf(false) }
+    var showWhatsAppHubDialog by rememberSaveable { mutableStateOf(false) }
     var editingContact by remember { mutableStateOf<ContactProfile?>(null) }
     var autoRequestedProjectionThisSession by rememberSaveable { mutableStateOf(false) }
     var launchPendingAfterProjection by remember { mutableStateOf(false) }
@@ -366,6 +370,16 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 }
 
                 item {
+                    WhatsAppConnectorQuickCard(
+                        waConfig = waConfig,
+                        onOpenWhatsAppHub = { showWhatsAppHubDialog = true },
+                        onToggleAutoReply = { enabled ->
+                            viewModel.waSyncRules(enabled, waConfig.aiReplyInstruction)
+                        }
+                    )
+                }
+
+                item {
                     val isCarromTrainRunning = (agentState is AgentUiState.Running &&
                         CarromCoachHelper.isCarromWatchTrainGoal((agentState as AgentUiState.Running).goal)) ||
                         (agentState is AgentUiState.Paused &&
@@ -552,6 +566,21 @@ fun DashboardScreen(viewModel: AgentViewModel) {
             onLaunchFbUiGoal = viewModel::launchFacebookUiAutomation,
             onDismissStatus = viewModel::fbDismissStatus,
             onDismiss = { showFacebookHubDialog = false }
+        )
+    }
+
+    if (showWhatsAppHubDialog) {
+        WhatsAppConnectorDialog(
+            config = waConfig,
+            contacts = contacts,
+            isBusy = waIsBusy,
+            statusBanner = waStatusBanner,
+            onRequestPairingCode = viewModel::waRequestPairingCode,
+            onCheckStatus = viewModel::waCheckStatus,
+            onSyncRules = viewModel::waSyncRules,
+            onDisconnect = viewModel::waDisconnect,
+            onDismissBanner = viewModel::waDismissBanner,
+            onDismiss = { showWhatsAppHubDialog = false }
         )
     }
 }
