@@ -762,9 +762,35 @@ app.get('/health', (req, res) => {
     });
 });
 
+async function restoreActiveSessionsOnBoot() {
+    try {
+        const entries = fs.readdirSync(SESSIONS_ROOT, { withFileTypes: true });
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const userId = sanitizeUserId(entry.name);
+            if (!userId) continue;
+            const credsFile = path.join(getSessionDir(userId), 'creds.json');
+            if (!fs.existsSync(credsFile)) continue;
+
+            const savedWa = connectorsStore.getConnectorWithCredentials(userId, 'whatsapp');
+            if (savedWa?.automation_rules?.whatsappPaused) {
+                console.log(`[Boot][${userId}] Skipping auto-restore (user paused bot).`);
+                continue;
+            }
+            console.log(`[Boot][${userId}] Auto-restoring saved WhatsApp session...`);
+            createBaileysSession(userId, '').catch((err) =>
+                console.error(`[Boot][${userId}] Restore failed:`, err.message)
+            );
+        }
+    } catch (err) {
+        console.error('[Boot] Failed to scan sessions directory:', err.message);
+    }
+}
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`TapPilot Unified Connector & WhatsApp Baileys Server running on port ${PORT}`);
     if (!BRIDGE_SECRET) {
         console.log('Tip: Set BRIDGE_SECRET env var in production to protect API endpoints.');
     }
+    restoreActiveSessionsOnBoot();
 });
