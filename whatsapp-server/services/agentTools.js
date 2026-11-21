@@ -84,59 +84,143 @@ function getUserTools(userId) {
     return tools;
 }
 
+const keyCooldownUntil = new Map();
+let openRouterRotationOffset = 0;
+
+function parseApiKeyList(...rawValues) {
+    const unique = new Set();
+    for (const raw of rawValues) {
+        if (!raw) continue;
+        const parts = String(raw)
+            .split(/[\s,;]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        for (const p of parts) {
+            unique.add(p);
+        }
+    }
+    return Array.from(unique);
+}
+
+function getAvailableKeys(keys, offset = 0) {
+    if (!keys.length) return [];
+    const now = Date.now();
+    const rotated = keys.map((_, i) => keys[(i + offset) % keys.length]);
+    const ready = rotated.filter((k) => (keyCooldownUntil.get(k) || 0) <= now);
+    return ready.length ? ready : rotated;
+}
+
+function markKeyCooldown(key, statusCode) {
+    const durationMs =
+        statusCode === 401 || statusCode === 402 || statusCode === 403
+            ? 30 * 60 * 1000
+            : 5 * 60 * 1000;
+    keyCooldownUntil.set(key, Date.now() + durationMs);
+}
+
+async function callOpenRouterWithKey(apiKey, model, systemInstruction, userPrompt) {
+    const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'X-Title': 'TapPilot Agent'
+        },
+        body: JSON.stringify({
+            model,
+            messages: [
+                { role: 'system', content: systemInstruction },
+                { role: 'user', content: userPrompt }
+            ],
+            max_tokens: 360,
+            temperature: 0.5
+        })
+    });
+    if (!resp.ok) {
+        return { ok: false, status: resp.status, content: null };
+    }
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content?.trim() || null;
+    return { ok: Boolean(content), status: resp.status, content };
+}
+
 async function callLLM(systemInstruction, userPrompt) {
-    const openRouterKey = (process.env.OPENROUTER_API_KEY || '').trim();
-    if (openRouterKey) {
-        try {
-            const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${openRouterKey}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    model: process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free',
-                    messages: [
-                        { role: 'system', content: systemInstruction },
-                        { role: 'user', content: userPrompt }
-                    ],
-                    max_tokens: 360,
-                    temperature: 0.5
-                })
-            });
-            if (resp.ok) {
-                const data = await resp.json();
-                const content = data?.choices?.[0]?.message?.content?.trim();
-                if (content) return content;
+    const openRouterKeys = parseApiKeyList(
+        process.env.OPENROUTER_API_KEYS,
+        process.env.OPENROUTER_API_KEY
+    );
+    if (openRouterKeys.length > 0) {
+        const candidateKeys = getAvailableKeys(openRouterKeys, openRouterRotationOffset);
+        openRouterRotationOffset = (openRouterRotationOffset + 1) % openRouterKeys.length;
+
+        const configuredModel = (process.env.OPENROUTER_MODEL || '').trim();
+        const modelsToTry = Array.from(
+            new Set(
+                [configuredModel, 'openrouter/free', 'google/gemini-2.0-flash-exp:free'].filter(Boolean)
+            )
+        );
+
+        for (const apiKey of candidateKeys) {
+            try {
+                let result = await callOpenRouterWithKey(
+                    apiKey,
+                    modelsToTry[0],
+                    systemInstruction,
+                    userPrompt
+                );
+                if (!result.ok && result.status === 404 && modelsToTry[1]) {
+                    result = await callOpenRouterWithKey(
+                        apiKey,
+                        modelsToTry[1],
+                        systemInstruction,
+                        userPrompt
+                    );
+                }
+                if (result.ok && result.content) {
+                    keyCooldownUntil.delete(apiKey);
+                    return result.content;
+                }
+                markKeyCooldown(apiKey, result.status);
+            } catch (err) {
+                console.error('[OpenRouter Failover]', err.message);
+                markKeyCooldown(apiKey, 500);
             }
-        } catch (err) {
-            console.error('[OpenRouter Error]', err.message);
         }
     }
 
-    const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
-    if (geminiKey) {
-        try {
-            const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-            const resp = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        systemInstruction: { parts: [{ text: systemInstruction }] },
-                        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-                        generationConfig: { maxOutputTokens: 360, temperature: 0.5 }
-                    })
+    const geminiKeys = parseApiKeyList(
+        process.env.GEMINI_API_KEYS,
+        process.env.GEMINI_API_KEY
+    );
+    if (geminiKeys.length > 0) {
+        const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+        for (const geminiKey of getAvailableKeys(geminiKeys)) {
+            try {
+                const resp = await fetch(
+                    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            systemInstruction: { parts: [{ text: systemInstruction }] },
+                            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+                            generationConfig: { maxOutputTokens: 360, temperature: 0.5 }
+                        })
+                    }
+                );
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const content = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                    if (content) {
+                        keyCooldownUntil.delete(geminiKey);
+                        return content;
+                    }
                 }
-            );
-            if (resp.ok) {
-                const data = await resp.json();
-                const content = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-                if (content) return content;
+                markKeyCooldown(geminiKey, resp.status);
+            } catch (err) {
+                console.error('[Gemini Failover]', err.message);
+                markKeyCooldown(geminiKey, 500);
             }
-        } catch (err) {
-            console.error('[Gemini Error]', err.message);
         }
     }
 
