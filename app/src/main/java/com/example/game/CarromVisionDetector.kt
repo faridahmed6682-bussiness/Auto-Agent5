@@ -1029,6 +1029,10 @@ object CarromVisionDetector {
         val cVisited = Array(rows) { BooleanArray(cols) }
         var contrastBestCenter: Point2D? = null
         var contrastBestCount = 0
+        // Largest component overall (count >= 5): last-resort knob when the
+        // filter below rejects every candidate (e.g. an unusually big skin).
+        var contrastLargestCenter: Point2D? = null
+        var contrastLargestCount = 0
         for (r in 0 until rows) {
             for (c in trackColStart..trackColEnd) {
                 if (!contrastActive[r][c] || cVisited[r][c]) continue
@@ -1068,13 +1072,22 @@ object CarromVisionDetector {
                 val spanR = (maxR - minR + 1).coerceAtLeast(1)
                 val spanC = (maxC - minC + 1).coerceAtLeast(1)
                 val aspect = maxOf(spanR, spanC).toFloat() / minOf(spanR, spanC).toFloat()
-                if (count in 5..180 && spanR >= 2 && spanC <= (cols * 0.16f).toInt().coerceAtLeast(8) && aspect <= 2.4f && count > contrastBestCount) {
+                if (count >= 5 && count > contrastLargestCount) {
+                    contrastLargestCount = count
+                    contrastLargestCenter = Point2D(sumX / count, sumY / count)
+                }
+                // Knob filter: a real knob merged with the slider track's edge
+                // is a wide flat blob (measured: count 333, spanC 43, aspect 3.31
+                // on a 720x1600 board), while the track end caps are smaller
+                // (count ~130). The old caps (180 / 0.16*cols / 2.4) rejected the
+                // real knob, so a track end was picked as the "knob" instead.
+                if (count in 5..400 && spanR >= 2 && spanC <= (cols * 0.30f).toInt().coerceAtLeast(12) && aspect <= 4.0f && count > contrastBestCount) {
                     contrastBestCount = count
                     contrastBestCenter = Point2D(sumX / count, sumY / count)
                 }
             }
         }
-        return contrastBestCenter
+        return contrastBestCenter ?: contrastLargestCenter
     }
 
     private fun promoteOrAnchorStriker(
