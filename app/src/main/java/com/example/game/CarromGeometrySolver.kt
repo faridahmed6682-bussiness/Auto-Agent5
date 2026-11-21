@@ -76,13 +76,96 @@ data class CarromShotSolution(
     val reason: String
 )
 
+data class PocketZonePlan(
+    val zoneName: String,
+    val primaryPocketIndex: Int,
+    val secondaryPocketIndex: Int,
+    val preferBankForBottomPockets: Boolean
+)
+
 /**
  * Pure Kotlin Ghost-Ball & Vector Physics Carrom Shot Solver.
  * Computes exact striker placement, cut angles, obstacle collision checks,
  * striker scratch-foul guards, 1-cushion bank/rebound, 2-coin combo, cluster break,
- * and adapts power & pocket choices from CarromMemoryData.
+ * 4-pocket center-out quadrant routing, and adapts power & pocket choices from CarromMemoryData.
  */
 object CarromGeometrySolver {
+
+    /**
+     * Center-Out & 4-Quadrant Pocket Routing Plan for 4-pocket Carrom boards (500/1000 Freestyle & Disc Pool):
+     * - 0 = Top-Left, 1 = Top-Right, 2 = Bottom-Left, 3 = Bottom-Right
+     */
+    fun planPocketForCoinPosition(
+        board: CarromBoardLayout,
+        coinCenter: Point2D
+    ): PocketZonePlan {
+        val nx = ((coinCenter.x - board.left) / board.width.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val ny = ((coinCenter.y - board.top) / board.height.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val onLeftHalf = nx <= 0.50f
+        return when {
+            ny >= 0.78f -> PocketZonePlan(
+                zoneName = if (onLeftHalf) "Bottom-Baseline-Left" else "Bottom-Baseline-Right",
+                primaryPocketIndex = if (onLeftHalf) 2 else 3,
+                secondaryPocketIndex = if (onLeftHalf) 0 else 1,
+                preferBankForBottomPockets = true
+            )
+            ny >= 0.65f -> PocketZonePlan(
+                zoneName = if (onLeftHalf) "Lower-Left" else "Lower-Right",
+                primaryPocketIndex = if (onLeftHalf) 2 else 3,
+                secondaryPocketIndex = if (onLeftHalf) 0 else 1,
+                preferBankForBottomPockets = false
+            )
+            nx in 0.30f..0.70f && ny in 0.30f..0.65f -> PocketZonePlan(
+                zoneName = if (onLeftHalf) "Center-Left" else "Center-Right",
+                primaryPocketIndex = if (onLeftHalf) 0 else 1,
+                secondaryPocketIndex = if (onLeftHalf) 1 else 0,
+                preferBankForBottomPockets = false
+            )
+            ny < 0.30f -> PocketZonePlan(
+                zoneName = if (onLeftHalf) "Top-Left-Rail" else "Top-Right-Rail",
+                primaryPocketIndex = if (onLeftHalf) 0 else 1,
+                secondaryPocketIndex = if (onLeftHalf) 1 else 0,
+                preferBankForBottomPockets = false
+            )
+            onLeftHalf -> PocketZonePlan(
+                zoneName = "Mid-Left",
+                primaryPocketIndex = 0,
+                secondaryPocketIndex = 2,
+                preferBankForBottomPockets = false
+            )
+            else -> PocketZonePlan(
+                zoneName = "Mid-Right",
+                primaryPocketIndex = 1,
+                secondaryPocketIndex = 3,
+                preferBankForBottomPockets = false
+            )
+        }
+    }
+
+    internal fun pocketPlanBonus(
+        board: CarromBoardLayout,
+        coin: CarromPiece,
+        pocketIndex: Int,
+        isFreestyle: Boolean
+    ): Float {
+        val plan = planPocketForCoinPosition(board, coin.center)
+        val zoneBonus = when (pocketIndex) {
+            plan.primaryPocketIndex -> 0.06f
+            plan.secondaryPocketIndex -> 0.025f
+            else -> 0f
+        }
+        val freestyleValueBonus = if (isFreestyle) {
+            when (coin.color) {
+                CoinColor.QUEEN -> 0.18f // 50 points
+                CoinColor.WHITE -> 0.09f // 20 points
+                CoinColor.BLACK -> 0.00f // 10 points
+                CoinColor.STRIKER -> 0f
+            }
+        } else {
+            if (coin.color == CoinColor.QUEEN) 0.09f else 0f
+        }
+        return zoneBonus + freestyleValueBonus
+    }
 
     fun solveBestShot(
         board: CarromBoardLayout,
@@ -163,8 +246,10 @@ object CarromGeometrySolver {
                     val cosAngle = dirSg.dot(dirCp).coerceIn(-1f, 1f)
                     val cutAngleDeg = (acos(cosAngle) * (180.0 / PI)).toFloat()
 
-                    // Physically impossible or ultra-thin unreliable cut shots (> 64 degrees)
-                    if (cutAngleDeg > 64f) continue
+                    val isLowerHalfBottomCut = (pocketIdx == 2 || pocketIdx == 3) &&
+                        coin.center.y >= board.top + board.height * 0.58f
+                    val maxAllowedCut = if (isLowerHalfBottomCut) 72f else 64f
+                    if (cutAngleDeg > maxAllowedCut) continue
 
                     // Verify striker -> ghostBall path does not clip another coin first
                     if (!isSegmentClear(
@@ -243,9 +328,9 @@ object CarromGeometrySolver {
                     }
 
                     val hangerBonus = if (isHanger) 0.16f else 0f
-                    val queenBonus = if (coin.color == CoinColor.QUEEN) 0.09f else 0f
+                    val planAndValueBonus = pocketPlanBonus(board, coin, pocketIdx, isFreestyle)
                     val coverBonus = if (queenPendingCover && coin.color == myCoinColor) 0.14f else 0f
-                    val angleScore = 1f - (cutAngleDeg / 66f) * 0.55f
+                    val angleScore = 1f - (cutAngleDeg / 74f) * 0.55f
                     val distScore = 1f - ((distCoinPocket + distStrikerGhost) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
                     val isCurrentStrikerPos = existingStriker != null && abs(strikerPos.x - existingStriker.center.x) < 18f
                     val existingBonus = if (isCurrentStrikerPos) (0.14f + inPlaceAdj).coerceIn(0.02f, 0.28f) else 0f
@@ -256,7 +341,7 @@ object CarromGeometrySolver {
                     val score = (
                         angleScore * 0.65f +
                             distScore * 0.35f +
-                            queenBonus +
+                            planAndValueBonus +
                             coverBonus +
                             hangerBonus +
                             existingBonus +
@@ -387,7 +472,8 @@ object CarromGeometrySolver {
             screenWidth = screenWidth,
             screenHeight = screenHeight,
             shotMemory = shotMemory,
-            outCandidates = bankPool
+            outCandidates = bankPool,
+            isFreestyle = isFreestyle
         )
 
         if (usePhysicsRollout && (directPool.isNotEmpty() || bankPool.isNotEmpty())) {
@@ -577,7 +663,10 @@ object CarromGeometrySolver {
                     if (distSg < board.strikerRadiusPx * 1.1f) continue
                     val dirSg = sg.normalized()
                     val cutDeg = (acos(dirSg.dot(dirCp).coerceIn(-1f, 1f)) * (180.0 / PI)).toFloat()
-                    if (cutDeg > 64f) continue
+                    val isLowerHalfBottomCut = (pocketIdx == 2 || pocketIdx == 3) &&
+                        coin.center.y >= board.top + board.height * 0.58f
+                    val maxAllowedCut = if (isLowerHalfBottomCut) 72f else 64f
+                    if (cutDeg > maxAllowedCut) continue
 
                     if (willStrikerScratchIntoPocket(strikerPos, ghostBall, dirSg, dirCp, cutDeg, board, extraScratchGuard)) {
                         continue
@@ -642,12 +731,12 @@ object CarromGeometrySolver {
                     }
 
                     val obstructionBias = if (clearCoinToPocket && clearStrikerToGhost) 0f else -0.18f
-                    val queenBonus = if (coin.color == CoinColor.QUEEN) 0.09f else 0f
+                    val planAndValueBonus = pocketPlanBonus(board, coin, pocketIdx, isFreestyle)
                     val hangerBonus = if (isHanger) 0.14f else 0f
                     val trainingBoost = (trainingMatch?.matchScore ?: 0f) * 0.24f
-                    val angleScore = 1f - (cutDeg / 66f) * 0.55f
+                    val angleScore = 1f - (cutDeg / 74f) * 0.55f
                     val distScore = 1f - ((distCoinPocket + distSg) / (board.width * 2.2f)).coerceIn(0f, 0.35f)
-                    val score = (angleScore * 0.65f + distScore * 0.35f + queenBonus + hangerBonus + obstructionBias + trainingBoost - collisionPenalty * 0.30f)
+                    val score = (angleScore * 0.65f + distScore * 0.35f + planAndValueBonus + hangerBonus + obstructionBias + trainingBoost - collisionPenalty * 0.30f)
                         .coerceIn(0.05f, 1f)
 
                     pool.add(
@@ -692,7 +781,8 @@ object CarromGeometrySolver {
             screenWidth = 1080,
             screenHeight = 2400,
             shotMemory = shotMemory,
-            outCandidates = pool
+            outCandidates = pool,
+            isFreestyle = isFreestyle
         )
 
         val minProbeSep = max(board.width * 0.14f, board.strikerRadiusPx * 2.2f)
@@ -992,7 +1082,8 @@ object CarromGeometrySolver {
         screenWidth: Int,
         screenHeight: Int,
         shotMemory: CarromMemoryData?,
-        outCandidates: MutableList<RolloutCandidate>? = null
+        outCandidates: MutableList<RolloutCandidate>? = null,
+        isFreestyle: Boolean = false
     ): CarromShotSolution? {
         var bestBank: CarromShotSolution? = null
         val r = board.coinRadiusPx
@@ -1007,6 +1098,7 @@ object CarromGeometrySolver {
         )
 
         for (coin in targetPieces) {
+            val zonePlan = planPocketForCoinPosition(board, coin.center)
             board.pockets.forEachIndexed { pocketIdx, pocket ->
                 for ((railName, mirrorFn) in railPlanes) {
                     val mirroredPocket = mirrorFn(pocket)
@@ -1014,14 +1106,14 @@ object CarromGeometrySolver {
                     if (toMirror.length() < r * 2f) continue
                     val dirBank = toMirror.normalized()
                     val ghostBall = coin.center - dirBank * (board.coinRadiusPx + board.strikerRadiusPx)
-                    if (!isInsidePlayableBoard(ghostBall, board, margin = board.strikerRadiusPx)) continue
+                    if (!isInsidePlayableBoard(ghostBall, board, margin = board.strikerRadiusPx * 0.55f)) continue
 
                     for (strikerPos in strikerCandidates) {
                         val sg = ghostBall - strikerPos
                         if (sg.length() < r * 1.5f) continue
                         val dirSg = sg.normalized()
                         val cutDeg = (acos(dirSg.dot(dirBank).coerceIn(-1f, 1f)) * (180.0 / PI)).toFloat()
-                        if (cutDeg > 38f) continue
+                        if (cutDeg > 46f) continue
 
                         if (!isSegmentClear(strikerPos, ghostBall, obstacles, coin, r + board.strikerRadiusPx * 0.9f)) {
                             continue
@@ -1048,7 +1140,15 @@ object CarromGeometrySolver {
                         val memoryBias = shotMemory?.confidenceBiasFor(pocketIdx, cutDeg) ?: 0f
                         val normStrikerX = ((strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
                         val heatmapPenalty = (shotMemory?.scratchHeatmap?.riskFor(pocketIdx, cutDeg, normStrikerX) ?: 0f) * 0.25f
-                        val score = (0.64f - (cutDeg / 60f) * 0.25f + memoryBias * 0.6f - heatmapPenalty).coerceIn(0.05f, 0.72f)
+                        val bottomBankBoost = if (zonePlan.preferBankForBottomPockets && pocketIdx == zonePlan.primaryPocketIndex) 0.08f else 0f
+                        val freestyleVal = if (isFreestyle) {
+                            when (coin.color) {
+                                CoinColor.QUEEN -> 0.14f
+                                CoinColor.WHITE -> 0.07f
+                                else -> 0f
+                            }
+                        } else 0f
+                        val score = (0.64f - (cutDeg / 66f) * 0.25f + bottomBankBoost + freestyleVal + memoryBias * 0.6f - heatmapPenalty).coerceIn(0.05f, 0.88f)
 
                         outCandidates?.add(
                             RolloutCandidate(

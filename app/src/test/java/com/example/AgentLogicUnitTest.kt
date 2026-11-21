@@ -3054,6 +3054,80 @@ class AgentLogicUnitTest {
             )
         )
     }
+
+    @Test
+    fun `four pocket center out plan routes every board zone and prioritizes freestyle red 50 and white 20`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f),  // 0: Top-Left
+                com.example.game.Point2D(960f, 560f),  // 1: Top-Right
+                com.example.game.Point2D(120f, 1400f), // 2: Bottom-Left
+                com.example.game.Point2D(960f, 1400f)  // 3: Bottom-Right
+            ),
+            baselineY = 1310f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+
+        // Verify Center-Out & 4-Quadrant pocket routing plan across all regions
+        val centerLeftPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(420f, 960f))
+        assertEquals(0, centerLeftPlan.primaryPocketIndex)
+        val centerRightPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(660f, 960f))
+        assertEquals(1, centerRightPlan.primaryPocketIndex)
+        val midLeftPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(160f, 900f))
+        assertEquals(0, midLeftPlan.primaryPocketIndex)
+        val midRightPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(920f, 900f))
+        assertEquals(1, midRightPlan.primaryPocketIndex)
+        val lowerLeftPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(360f, 1180f))
+        assertEquals(2, lowerLeftPlan.primaryPocketIndex)
+        val lowerRightPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(720f, 1180f))
+        assertEquals(3, lowerRightPlan.primaryPocketIndex)
+        val baselineLeftPlan = com.example.game.CarromGeometrySolver.planPocketForCoinPosition(board, com.example.game.Point2D(450f, 1300f))
+        assertEquals(2, baselineLeftPlan.primaryPocketIndex)
+        assertTrue(baselineLeftPlan.preferBankForBottomPockets)
+
+        // Exact 1000-coin Freestyle board layout from user screenshot (Red=50, White=20, Black=10)
+        val striker = com.example.game.CarromPiece(com.example.game.CoinColor.STRIKER, com.example.game.Point2D(540f, 1310f), 35f)
+        val screenshotCoins = listOf(
+            com.example.game.CarromPiece(com.example.game.CoinColor.QUEEN, com.example.game.Point2D(195f, 770f), 28f), // Red 50 upper-left
+            com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(155f, 895f), 28f), // White 20 mid-left
+            com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(365f, 995f), 28f), // White 20 center-left
+            com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(575f, 650f), 28f), // White 20 top
+            com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, com.example.game.Point2D(765f, 855f), 28f), // Black 10 mid-right
+            com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(920f, 875f), 28f), // White 20 far-right
+            com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, com.example.game.Point2D(390f, 1145f), 28f), // Black 10 lower-left
+            com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, com.example.game.Point2D(635f, 1235f), 28f), // Black 10 lower-right
+            com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(455f, 1275f), 28f), // White 20 baseline-left
+            com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(585f, 1285f), 28f), // White 20 baseline-right
+            striker
+        )
+
+        val sol = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = screenshotCoins,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            existingStriker = striker,
+            canRepositionStriker = true,
+            shotMemory = null,
+            usePhysicsRollout = true,
+            isFreestyle = true
+        )
+        org.junit.Assert.assertNotNull(sol)
+        assertTrue("Expected zero-foul Sure Shot on 1000-coin Freestyle layout, got ${sol!!.reason}", sol.isSureShot)
+        assertFalse(sol.rejectedDueToCollisionOrFoul)
+        // High-value Red (50) or White (20) should be preferred over 10-point Black when clean pots exist
+        assertTrue(
+            "Expected Red (50) or White (20) high-value Freestyle target, got ${sol.targetCoin.color}",
+            sol.targetCoin.color == com.example.game.CoinColor.QUEEN || sol.targetCoin.color == com.example.game.CoinColor.WHITE
+        )
+    }
 }
 
 

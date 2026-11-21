@@ -96,7 +96,9 @@ object CarromPhysicsSimulator {
         val jawClearenceScore: Float,
         val firstStrikerHitIsTarget: Boolean,
         val targetDeflectedByNonTarget: Boolean,
-        val kissedObstacleCount: Int
+        val kissedObstacleCount: Int,
+        val pottedWhiteCoins: Int = 0,
+        val pottedBlackCoins: Int = 0
     )
 
     fun verifyAndRefineCandidates(
@@ -185,7 +187,8 @@ object CarromPhysicsSimulator {
                         candidate = candidate,
                         outcome = outcome,
                         angleOffsetDeg = angleDeg,
-                        shotMemory = shotMemory
+                        shotMemory = shotMemory,
+                        isFreestyle = isFreestyle
                     )
                     if (localScore > bestLocalScore) {
                         bestLocalScore = localScore
@@ -235,7 +238,8 @@ object CarromPhysicsSimulator {
                             candidate = candidate,
                             outcome = fineOutcome,
                             angleOffsetDeg = testAngle,
-                            shotMemory = shotMemory
+                            shotMemory = shotMemory,
+                            isFreestyle = isFreestyle
                         )
                         if (fineScore > bestLocalScore) {
                             bestLocalScore = fineScore
@@ -504,7 +508,7 @@ object CarromPhysicsSimulator {
                         if (cleanPot) {
                             angleHitsAtPwr++
                         }
-                        val s = scoreOutcome(cand, outcome, ang, shotMemory)
+                        val s = scoreOutcome(cand, outcome, ang, shotMemory, isFreestyle)
                         if (s > bestCandScore) {
                             bestCandScore = s
                             bestOutcome = outcome
@@ -822,6 +826,9 @@ object CarromPhysicsSimulator {
             bodies.count { it.pocketed && it.color == oppColor }
         }
 
+        val pottedWhite = bodies.count { it.pocketed && it.color == CoinColor.WHITE }
+        val pottedBlack = bodies.count { it.pocketed && it.color == CoinColor.BLACK }
+
         return SingleRolloutOutcome(
             pottedMyCoins = pottedMy,
             pottedQueen = pottedQueen,
@@ -832,7 +839,9 @@ object CarromPhysicsSimulator {
             jawClearenceScore = bestJawClearance,
             firstStrikerHitIsTarget = firstStrikerHitIsTarget,
             targetDeflectedByNonTarget = targetDeflectedByNonTarget,
-            kissedObstacleCount = kissedObstacleCount
+            kissedObstacleCount = kissedObstacleCount,
+            pottedWhiteCoins = pottedWhite,
+            pottedBlackCoins = pottedBlack
         )
     }
 
@@ -840,7 +849,8 @@ object CarromPhysicsSimulator {
         candidate: RolloutCandidate,
         outcome: SingleRolloutOutcome,
         angleOffsetDeg: Float,
-        shotMemory: CarromMemoryData?
+        shotMemory: CarromMemoryData?,
+        isFreestyle: Boolean = false
     ): Float {
         if (outcome.strikerScratched) {
             return -0.98f
@@ -852,10 +862,15 @@ object CarromPhysicsSimulator {
 
         var score = 0.25f
         if (outcome.pottedQueen) {
-            score += 0.50f
+            score += if (isFreestyle) 0.62f else 0.50f
         }
         if (outcome.pottedMyCoins > 0) {
-            score += 0.42f + (outcome.pottedMyCoins - 1) * 0.14f
+            val freestyleColorBonus = if (isFreestyle) {
+                outcome.pottedWhiteCoins * 0.10f
+            } else {
+                0f
+            }
+            score += 0.42f + (outcome.pottedMyCoins - 1) * 0.14f + freestyleColorBonus
             score += outcome.jawClearenceScore * 0.12f
         } else if (candidate.isBreakShot) {
             // Break shot doesn't guarantee a pot, so reward avoiding fouls and disturbing target
