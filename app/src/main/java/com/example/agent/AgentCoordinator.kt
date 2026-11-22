@@ -2326,7 +2326,13 @@ object AgentCoordinator {
             0L
         }
         val telemetry = state.carromTurnMemory.formatTurnTelemetry(nowCarromMs, finalSol)
-        state.carromTurnMemory.resetTurn()
+        // 5s rule (Fix 3, 2026-11-22): resetTurn() used to run here,
+        // BEFORE the safety-hold decision below — it zeroed the turn
+        // clock, so canAffordToWaitForSureShot() always returned true
+        // and the 4.5s deadline never arrived (safety held forever on
+        // cluster boards). The turn now resets ONLY when a drag is
+        // actually fired (else branch below); the WAIT path keeps the
+        // clock running so the held safety fires at the deadline.
 
         val modeTag = if (analysis.isFreestyleMode) "Freestyle" else analysis.myCarromCoinColor.name
         val pullDistPx = kotlin.math.hypot(
@@ -2378,6 +2384,10 @@ object AgentCoordinator {
                 requiresConfirmation = false
             )
         } else {
+            // Firing now (sure shot, deadline fire, or a safety that can
+            // no longer wait): the turn ends with this drag, so reset
+            // the turn memory here — and only here.
+            state.carromTurnMemory.resetTurn()
             if (humanPauseMs > 0L) delay(humanPauseMs)
             PlannedAction(
                 actionType = AgentActionType.DRAG,

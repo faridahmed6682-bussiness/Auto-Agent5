@@ -327,6 +327,15 @@ object CarromVisionDetector {
         } else {
             prelimStrikerRaw
         }
+        // Visual striker confirmation (phantom-striker gate, 2026-11-22):
+        // a real disc was SEEN on the bottom baseline band — a coloured
+        // disc (rawStrikerAligned), a contrast/Hough disc
+        // (detectAnyStrikerOnBaseline), or the turn-glow halo around the
+        // bottom striker. The slider knob alone NEVER confirms a striker:
+        // it is a UI control that is also visible on the opponent's turn,
+        // and promoteOrAnchorStriker synthesises a striker at the anchor
+        // x whenever the knob is present.
+        val strikerVisuallyConfirmed = prelimStriker != null || glowCenter.detected
         val cleanedPieces = if (prelimStriker != null) {
             val clearR = strikerRadius * 1.40f
             rawPieces.filter { p ->
@@ -376,15 +385,17 @@ object CarromVisionDetector {
         }
 
         val strikerPiece = promoted.firstOrNull { it.color == CoinColor.STRIKER }
-        // Fallback striker: when our striker/slider cannot be seen on the bottom
-        // baseline but no opponent striker is visible on the top baseline either,
-        // the "whose turn is it" signal itself is unreliable. The old code waited
-        // out the budget and then returned NeedsAiVision here, which the
-        // coordinator turns into an endless WAIT whenever no AI-Vision key is
-        // configured — so the striker sat completely still forever and the auto
-        // turn never started. After the wait budget, assume it IS our turn and
-        // play from the baseline centre instead of sitting still.
-        var fallbackStriker: CarromPiece? = null
+        // No striker disc AND no slider knob on the bottom baseline:
+        // the "whose turn is it" signal itself is unreliable. Wait out
+        // the budget for the turn to start (opponent striker on the top
+        // baseline, or our striker/glow appearing below). After the
+        // budget, do NOT synthesise a centre striker and fire from it:
+        // a guessed striker starts the drag on empty board and the game
+        // ignores it (screenshot 2026-11-22: 15 discs visible, bot
+        // counted 15 pieces + striker). Wait for a visually confirmed
+        // striker instead — the old NeedsAiVision escape turned into an
+        // endless WAIT whenever no AI-Vision key was configured, and a
+        // blind centre drag is worse than waiting.
         if (strikerPiece == null && sliderKnobPx == null) {
             val detectedTopStriker = detectTopStrikerOnBaseline(
                 bitmap = screenshot,
@@ -427,12 +438,15 @@ object CarromVisionDetector {
                     (isFreestyle || it.color == myCoinColor || it.color == CoinColor.QUEEN)
             }
             if (detectedTopStriker == null && hasTargetCoin) {
-                // No opponent striker seen and a pottable coin is visible: synthesize
-                // our striker at the baseline centre so the solver can take a shot.
-                fallbackStriker = CarromPiece(
-                    CoinColor.STRIKER,
-                    Point2D((boardLeft + boardRight) / 2f, defaultBaselineY),
-                    strikerRadius
+                // No opponent striker seen and a pottable coin is visible —
+                // but NO visual striker confirmation (no disc, no glow):
+                // firing from a guessed centre striker would start the
+                // drag on empty board. Keep waiting for the striker to
+                // actually appear on the baseline instead.
+                return CarromVisionOutcome.WaitStillnessOrTurn(
+                    reason = "Striker not visually confirmed on bottom baseline — waiting offline for our turn (0 API).",
+                    boardPieces = promoted,
+                    turnGlowDetected = turnBannerDetected
                 )
             } else {
                 return CarromVisionOutcome.NeedsAiVision(
@@ -447,7 +461,22 @@ object CarromVisionDetector {
             val margin = strikerRadius * 2.1f
             val mappedX = knob.x.coerceIn(boardLeft + margin, boardRight - margin)
             CarromPiece(CoinColor.STRIKER, Point2D(mappedX, defaultBaselineY), strikerRadius)
-        } ?: fallbackStriker
+        }
+        // Phantom-striker gate: a knob-only striker is not a seen disc —
+        // the slider knob is a UI control that is also visible on the
+        // opponent's turn. Firing from it starts the drag on empty board
+        // and the game ignores it (screenshot 2026-11-22). Wait for the
+        // striker disc (or its turn-glow halo) to actually appear on the
+        // bottom baseline instead; the coordinator keeps the turn clock
+        // running on this WAIT, so the 4.5s deadline still applies once
+        // the striker is confirmed.
+        if (effectiveStriker != null && !strikerVisuallyConfirmed) {
+            return CarromVisionOutcome.WaitStillnessOrTurn(
+                reason = "Striker not visually confirmed on bottom baseline (knob-only anchor) — waiting offline (0 API).",
+                boardPieces = promoted,
+                turnGlowDetected = turnBannerDetected
+            )
+        }
         val calibratedBaselineY = effectiveStriker?.center?.y ?: defaultBaselineY
         val boardLayout = CarromBoardLayout(
             left = boardLeft,
@@ -833,6 +862,11 @@ object CarromVisionDetector {
             null
         }
         val prelimStriker = contrastStriker ?: rawStrikerAligned
+        // Same visual-confirmation rule as analyzeAndSolve (phantom-
+        // striker gate, 2026-11-22): only a SEEN disc (or its turn-glow
+        // halo) counts as the bottom striker. A knob-synthesised striker
+        // must not make the HUD claim "Striker ✓".
+        val strikerVisuallyConfirmed = prelimStriker != null || glowCenter.detected
         val cleanedPieces = if (prelimStriker != null) {
             val clearR = strikerRadius * 1.40f
             rawPieces.filter { p ->
@@ -905,7 +939,7 @@ object CarromVisionDetector {
         return CarromWatchObservation(
             board = boardLayout,
             pieces = finalWatchPieces,
-            striker = strikerPiece,
+            striker = if (strikerVisuallyConfirmed) strikerPiece else null,
             sliderKnob = sliderKnobPx,
             lumaDiff = meanDiff,
             isInMotion = isInMotion,
